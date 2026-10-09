@@ -96,6 +96,24 @@ pub fn sleep_us(us: u64) {
     }
 }
 
+/// Sleep at most this long, or till another CPU wakes this one: for a
+/// wait that is to end at a wake as well as at a time. Without the timer,
+/// a short spin.
+pub fn nap_us(us: u64) {
+    if TIMER.load(Ordering::Acquire) {
+        plat::nap_us(us);
+    } else {
+        spin_us(us.clamp(1, 1000));
+    }
+}
+
+/// wake CPU n, if it naps or idles
+pub fn wake(n: usize) {
+    if n < crate::smp::cpus() {
+        plat::wake(crate::smp::CPUS[n].hw_id.load(Ordering::Relaxed));
+    }
+}
+
 /// days since 1970 of a date, Howard Hinnant's days_from_civil
 pub fn days_from_civil(y: i64, m: i64, d: i64) -> i64 {
     let y = if m <= 2 { y - 1 } else { y };

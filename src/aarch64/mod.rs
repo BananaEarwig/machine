@@ -17,7 +17,7 @@ use alloc::vec::Vec;
 use core::arch::asm;
 use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
-pub use gic::{idle, sleep_us, wake};
+pub use gic::{idle, nap_us, sleep_us, wake};
 pub use start::{call_node, exit_node};
 
 pub const NAME: &str = "aarch64";
@@ -54,6 +54,12 @@ pub fn this_cpu() -> usize {
 
 pub fn set_this_cpu(n: usize) {
     msr!("tpidr_el1", n as u64);
+}
+
+/// A pointer of this CPU's own, for code that is not the kernel's:
+/// TPIDR_EL0, which the kernel leaves be.
+pub fn set_cpu_local(p: u64) {
+    msr!("tpidr_el0", p);
 }
 
 /// the clock's counter, the virtual count of the generic timer

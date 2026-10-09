@@ -153,6 +153,19 @@ pub fn sleep_us(us: u64) {
     }
 }
 
+/// Sleep at most this long, or till anything wakes the CPU, an SGI from
+/// another say: one wfi, for a caller that looks again when it ends.
+pub fn nap_us(us: u64) {
+    let ticks = (us.max(1) as u128 * cpu::counter_hz() as u128 / 1_000_000) as u64;
+    msr!("cntv_cval_el0", super::counter() + ticks.max(1));
+    msr!("cntv_ctl_el0", 1);
+    isb();
+    halt();
+    msr!("cntv_ctl_el0", 0);
+    isb();
+    ack_all();
+}
+
 /// idle till woken
 pub fn idle() {
     halt();

@@ -10,7 +10,7 @@ use alloc::vec::Vec;
 use core::arch::asm;
 use uefi::boot::{self, AllocateType, MemoryType};
 
-pub use apic::{idle, sleep_us};
+pub use apic::{idle, nap_us, sleep_us};
 pub use start::{call_node, exit_node, this_cpu};
 
 pub const NAME: &str = "x86_64";
@@ -179,6 +179,12 @@ pub unsafe fn take_machine(fw: Firmware) -> usize {
 
 pub fn describe() -> alloc::string::String {
     alloc::format!("APIC timer {} MHz", apic::timer_mhz())
+}
+
+/// A pointer of this CPU's own, for code that is not the kernel's: GS's
+/// base, so `gs:[n]` reaches what it points to. The kernel uses no GS.
+pub fn set_cpu_local(p: u64) {
+    unsafe { apic::wrmsr(0xc000_0101, p) };
 }
 
 /// wake a CPU that is halted

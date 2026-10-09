@@ -326,6 +326,21 @@ pub fn sleep_us(us: u64) {
     }
 }
 
+/// Sleep at most this long, or till anything wakes the CPU, an IPI from
+/// another say: one halt, for a caller that looks again when it ends.
+pub fn nap_us(us: u64) {
+    let per_ms = LAPIC_TICKS_PER_MS.load(Ordering::Relaxed);
+    if per_ms == 0 {
+        cpu::spin_us(us.min(1000));
+        return;
+    }
+    let ticks = (us.max(1) * per_ms / 1000).clamp(1, u32::MAX as u64) as u32;
+    lapic_write(LAPIC_LVT_TIMER, VECTOR_TIMER as u32);
+    lapic_write(LAPIC_TIMER_INIT, ticks);
+    halt();
+    lapic_write(LAPIC_TIMER_INIT, 0);
+}
+
 /// idle till woken, an IPI or the next timer
 pub fn idle() {
     halt();
