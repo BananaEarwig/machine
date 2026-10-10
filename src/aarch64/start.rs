@@ -76,14 +76,19 @@ extern "C" {
 
 const STACK: usize = 64 << 10;
 
-/// how long the CPUs have, all together, to come up
-const START_US: u64 = 3_000_000;
+/// how long a CPU has to come up, from its CPU_ON, before it is asked
+/// again; and how many times it is asked
+const START_US: u64 = 250_000;
+const TRIES: usize = 4;
 
 /// Start every CPU of the machine, all at once, each with a boot block and
 /// a stack of its own, as the n-th of the firmware's list: then wait till
-/// they are up, three seconds at most for all of them. One that is slower
-/// still comes up when it can, and waits for a job like the others.
-/// Returns how many are running, the boot one with them.
+/// they are up. One not up in a quarter of a second is asked again, with
+/// CPU_ON, which says whether the first was lost (it starts now) or is
+/// still on its way (ON_PENDING, ALREADY_ON); after four, a second, the
+/// boot goes on without it. One that is slower still comes up when it
+/// can, and waits for a job like the others. Returns how many are running,
+/// the boot one with them.
 pub unsafe fn start_cpus(cpus: &[CpuInfo]) -> usize {
     let code = core::ptr::addr_of!(secondary_entry) as usize;
     clean_to_poc(code, core::ptr::addr_of!(secondary_entry_end) as usize - code);
@@ -111,15 +116,31 @@ pub unsafe fn start_cpus(cpus: &[CpuInfo]) -> usize {
         }
     }
     smp::set_cpus(slots);
-    let t0 = cpu::now_us();
     let want = started.iter().filter(|&&s| s).count();
     let up = || (1..slots).filter(|&n| CPUS[n].online.load(Ordering::Acquire)).count();
-    while up() < want && cpu::now_us() < t0 + START_US {
-        core::hint::spin_loop();
-    }
-    for (n, c) in cpus.iter().enumerate().take(slots).skip(1) {
-        if started[n] && !CPUS[n].online.load(Ordering::Acquire) {
-            crate::kprintln!("[machine] CPU {:#x} has not come up yet", c.mpidr);
+    let t0 = cpu::now_us();
+    for attempt in 1..=TRIES {
+        let until = cpu::now_us() + START_US;
+        while up() < want && cpu::now_us() < until {
+            core::hint::spin_loop();
+        }
+        if up() == want {
+            break;
+        }
+        for (n, c) in cpus.iter().enumerate().take(slots).skip(1) {
+            if !started[n] || CPUS[n].online.load(Ordering::Acquire) {
+                continue;
+            }
+            let ms = (cpu::now_us() - t0) / 1000;
+            if attempt == TRIES {
+                crate::kprintln!("[machine] CPU {:#x} not up after {} ms, going on without it", c.mpidr, ms);
+                continue;
+            }
+            // asked again: 0 if the first was lost, -4 ALREADY_ON if it
+            // is running but not here yet, -5 ON_PENDING if still starting
+            let b = &(*core::ptr::addr_of!(BOOT))[n];
+            let r = cpu_on(c.mpidr, code as u64, b as *const BootBlock as u64);
+            crate::kprintln!("[machine] CPU {:#x} not up after {} ms, CPU_ON again: {}", c.mpidr, ms, r);
         }
     }
     1 + up()
