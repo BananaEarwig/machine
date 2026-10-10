@@ -43,9 +43,15 @@ impl Cpu {
 pub static CPUS: [Cpu; MAX_CPUS] = [const { Cpu::new() }; MAX_CPUS];
 static NCPUS: AtomicUsize = AtomicUsize::new(1);
 
-/// how many CPUs are running, jobs or waiting for one
+/// how many CPUs there are places for, numbered from 0; each that is
+/// running, jobs or waiting for one, is `online`
 pub fn cpus() -> usize {
     NCPUS.load(Ordering::Relaxed)
+}
+
+/// how many CPUs are running, jobs or waiting for one
+pub fn online() -> usize {
+    (0..cpus()).filter(|&n| CPUS[n].online.load(Ordering::Acquire)).count()
 }
 
 pub fn set_cpus(n: usize) {

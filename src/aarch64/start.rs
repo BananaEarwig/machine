@@ -28,8 +28,10 @@ struct BootBlock {
     arg: u64,    // 72
 }
 
-static mut BOOT: BootBlock =
-    BootBlock { mair: 0, tcr: 0, ttbr0: 0, ttbr1: 0, cpacr: 0, sctlr: 0, vbar: 0, stack: 0, entry: 0, arg: 0 };
+/// One for each CPU, so one that starts late reads its own, never the
+/// next one's.
+static mut BOOT: [BootBlock; MAX_CPUS] =
+    [const { BootBlock { mair: 0, tcr: 0, ttbr0: 0, ttbr1: 0, cpacr: 0, sctlr: 0, vbar: 0, stack: 0, entry: 0, arg: 0 } }; MAX_CPUS];
 
 global_asm!(
     ".balign 64",
@@ -74,44 +76,53 @@ extern "C" {
 
 const STACK: usize = 64 << 10;
 
-/// Start every CPU of the machine, one at a time. Returns how many are
-/// running, the boot one with them.
+/// how long the CPUs have, all together, to come up
+const START_US: u64 = 3_000_000;
+
+/// Start every CPU of the machine, all at once, each with a boot block and
+/// a stack of its own, as the n-th of the firmware's list: then wait till
+/// they are up, three seconds at most for all of them. One that is slower
+/// still comes up when it can, and waits for a job like the others.
+/// Returns how many are running, the boot one with them.
 pub unsafe fn start_cpus(cpus: &[CpuInfo]) -> usize {
-    let b = &mut *core::ptr::addr_of_mut!(BOOT);
-    b.mair = mrs!("mair_el1");
-    b.tcr = mrs!("tcr_el1");
-    b.ttbr0 = mrs!("ttbr0_el1");
-    b.ttbr1 = mrs!("ttbr1_el1");
-    b.cpacr = mrs!("cpacr_el1");
-    b.sctlr = mrs!("sctlr_el1");
-    b.vbar = mrs!("vbar_el1");
-    b.entry = secondary_main as *const () as usize as u64;
     let code = core::ptr::addr_of!(secondary_entry) as usize;
     clean_to_poc(code, core::ptr::addr_of!(secondary_entry_end) as usize - code);
-
-    let mut n = 1;
-    for c in cpus.iter().skip(1) {
-        if n >= MAX_CPUS {
-            break;
-        }
+    let slots = cpus.len().clamp(1, MAX_CPUS);
+    let mut started = [false; MAX_CPUS];
+    for (n, c) in cpus.iter().enumerate().take(slots).skip(1) {
+        let b = &mut (*core::ptr::addr_of_mut!(BOOT))[n];
+        b.mair = mrs!("mair_el1");
+        b.tcr = mrs!("tcr_el1");
+        b.ttbr0 = mrs!("ttbr0_el1");
+        b.ttbr1 = mrs!("ttbr1_el1");
+        b.cpacr = mrs!("cpacr_el1");
+        b.sctlr = mrs!("sctlr_el1");
+        b.vbar = mrs!("vbar_el1");
+        b.entry = secondary_main as *const () as usize as u64;
         CPUS[n].hw_id.store(c.mpidr, Ordering::Relaxed);
         let stack = alloc::vec![0u8; STACK].leak();
         b.stack = stack.as_mut_ptr().add(STACK) as u64;
         b.arg = n as u64;
         clean_to_poc(b as *const BootBlock as usize, core::mem::size_of::<BootBlock>());
         let r = cpu_on(c.mpidr, code as u64, b as *const BootBlock as u64);
-        let t0 = cpu::now_us();
-        while r == 0 && !CPUS[n].online.load(Ordering::Acquire) && cpu::now_us() < t0 + 1_000_000 {
-            core::hint::spin_loop();
-        }
-        if CPUS[n].online.load(Ordering::Acquire) {
-            n += 1;
-        } else {
-            crate::kprintln!("[machine] CPU {:#x} did not start ({})", c.mpidr, r);
+        started[n] = r == 0;
+        if r != 0 {
+            crate::kprintln!("[machine] CPU {:#x} would not start ({})", c.mpidr, r);
         }
     }
-    smp::set_cpus(n);
-    n
+    smp::set_cpus(slots);
+    let t0 = cpu::now_us();
+    let want = started.iter().filter(|&&s| s).count();
+    let up = || (1..slots).filter(|&n| CPUS[n].online.load(Ordering::Acquire)).count();
+    while up() < want && cpu::now_us() < t0 + START_US {
+        core::hint::spin_loop();
+    }
+    for (n, c) in cpus.iter().enumerate().take(slots).skip(1) {
+        if started[n] && !CPUS[n].online.load(Ordering::Acquire) {
+            crate::kprintln!("[machine] CPU {:#x} has not come up yet", c.mpidr);
+        }
+    }
+    1 + up()
 }
 
 /// where a CPU other than the boot one comes, with its MMU on
