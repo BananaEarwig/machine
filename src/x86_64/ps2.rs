@@ -1,36 +1,54 @@
 //! The PS/2 keyboard, a laptop's own as most present it, through the 8042
 //! controller at ports 0x60 and 0x64: polled, scan code set 1 as the
-//! controller translates it by default, turned into the bytes a terminal
-//! sends. Keys with letters and numbers, shift, control and caps lock;
-//! the arrows, home, end and delete as ANSI sequences. The mouse's bytes
-//! are let go.
+//! controller translates it by default, decoded by the `pc-keyboard`
+//! crate in the layout asked for (`set_layout`), US unless told, and
+//! turned into the bytes a terminal sends: UTF-8, a return for Enter, DEL
+//! for backspace, the control letters, and ANSI sequences for the arrows,
+//! home, end and delete. The mouse's bytes are let go.
 //!
 //! A machine with no controller reads 0xff from its status port, and so has
 //! no keyboard here.
 
 use super::inb;
+use pc_keyboard::layouts::{self, AnyLayout};
+use pc_keyboard::{DecodedKey, HandleControl, KeyCode, PS2Keyboard, ScancodeSet1};
 
 const DATA: u16 = 0x60;
 const STATUS: u16 = 0x64;
 
 struct Keys {
-    shift: bool,
-    ctrl: bool,
-    caps: bool,
-    /// an 0xe0, the next code is of the extended keys
-    extended: bool,
+    kb: PS2Keyboard<AnyLayout, ScancodeSet1>,
     /// bytes made, not yet taken
-    queue: [u8; 16],
+    queue: [u8; 32],
     head: usize,
     len: usize,
 }
 
-static KEYS: spin::Mutex<Keys> =
-    spin::Mutex::new(Keys { shift: false, ctrl: false, caps: false, extended: false, queue: [0; 16], head: 0, len: 0 });
+static KEYS: spin::Mutex<Keys> = spin::Mutex::new(Keys {
+    kb: PS2Keyboard::new(ScancodeSet1::new(), AnyLayout::Us104Key(layouts::Us104Key), HandleControl::MapLettersToUnicode),
+    queue: [0; 32],
+    head: 0,
+    len: 0,
+});
 
-// set 1, unshifted and shifted, for codes 0x00 to 0x39
-const PLAIN: &[u8; 58] = b"\0\x1b1234567890-=\x08\tqwertyuiop[]\n\0asdfghjkl;'`\0\\zxcvbnm,./\0*\0 ";
-const SHIFTED: &[u8; 58] = b"\0\x1b!@#$%^&*()_+\x08\tQWERTYUIOP{}\n\0ASDFGHJKL:\"~\0|ZXCVBNM<>?\0*\0 ";
+/// The keyboard's layout, by name: us, uk, de, fr, no, fi or se, jp,
+/// dvorak, colemak. False, and the layout as it was, for any other.
+pub fn set_layout(name: &str) -> bool {
+    let layout = match name.trim().to_ascii_lowercase().as_str() {
+        "us" => AnyLayout::Us104Key(layouts::Us104Key),
+        "uk" | "gb" => AnyLayout::Uk105Key(layouts::Uk105Key),
+        "de" => AnyLayout::De105Key(layouts::De105Key),
+        "fr" | "azerty" => AnyLayout::Azerty(layouts::Azerty),
+        "no" => AnyLayout::No105Key(layouts::No105Key),
+        "fi" | "se" => AnyLayout::FiSe105Key(layouts::FiSe105Key),
+        "jp" => AnyLayout::Jis109Key(layouts::Jis109Key),
+        "dvorak" => AnyLayout::Dvorak104Key(layouts::Dvorak104Key),
+        "colemak" => AnyLayout::Colemak(layouts::Colemak),
+        _ => return false,
+    };
+    KEYS.lock().kb = PS2Keyboard::new(ScancodeSet1::new(), layout, HandleControl::MapLettersToUnicode);
+    true
+}
 
 impl Keys {
     fn push(&mut self, bytes: &[u8]) {
@@ -54,54 +72,28 @@ impl Keys {
     }
 
     fn code(&mut self, c: u8) {
-        if c == 0xe0 {
-            self.extended = true;
-            return;
-        }
-        let up = c & 0x80 != 0;
-        let key = c & 0x7f;
-        let extended = core::mem::replace(&mut self.extended, false);
-        match key {
-            0x2a | 0x36 => self.shift = !up,
-            0x1d => self.ctrl = !up,
-            0x3a if !up => self.caps = !self.caps,
-            _ if up => {}
-            _ if extended => match key {
-                0x48 => self.push(b"\x1b[A"),
-                0x50 => self.push(b"\x1b[B"),
-                0x4d => self.push(b"\x1b[C"),
-                0x4b => self.push(b"\x1b[D"),
-                0x47 => self.push(b"\x1b[H"),
-                0x4f => self.push(b"\x1b[F"),
-                0x53 => self.push(b"\x1b[3~"),
-                0x1c => self.push(b"\r"),
-                0x35 => self.push(b"/"),
+        let Ok(Some(ev)) = self.kb.add_byte(c) else { return };
+        match self.kb.process_keyevent(ev) {
+            Some(DecodedKey::Unicode(ch)) => match ch {
+                '\n' | '\r' => self.push(b"\r"),
+                '\u{8}' => self.push(&[0x7f]),
+                '\u{7f}' => self.push(b"\x1b[3~"),
+                _ => {
+                    let mut buf = [0u8; 4];
+                    self.push(ch.encode_utf8(&mut buf).as_bytes());
+                }
+            },
+            Some(DecodedKey::RawKey(k)) => match k {
+                KeyCode::ArrowUp => self.push(b"\x1b[A"),
+                KeyCode::ArrowDown => self.push(b"\x1b[B"),
+                KeyCode::ArrowRight => self.push(b"\x1b[C"),
+                KeyCode::ArrowLeft => self.push(b"\x1b[D"),
+                KeyCode::Home => self.push(b"\x1b[H"),
+                KeyCode::End => self.push(b"\x1b[F"),
+                KeyCode::Delete => self.push(b"\x1b[3~"),
                 _ => {}
             },
-            // the keypad's own
-            0x4a => self.push(b"-"),
-            0x4e => self.push(b"+"),
-            k if (k as usize) < PLAIN.len() => {
-                let mut b = if self.shift { SHIFTED[k as usize] } else { PLAIN[k as usize] };
-                if b == 0 {
-                    return;
-                }
-                if self.caps && b.is_ascii_alphabetic() {
-                    b ^= 0x20;
-                }
-                if self.ctrl && b.is_ascii_alphabetic() {
-                    b &= 0x1f;
-                }
-                // a terminal sends a return for the key, and DEL for backspace
-                if b == b'\n' {
-                    b = b'\r';
-                }
-                if b == 0x08 {
-                    b = 0x7f;
-                }
-                self.push(&[b]);
-            }
-            _ => {}
+            None => {}
         }
     }
 }

@@ -245,8 +245,8 @@ pub unsafe fn start_cpus(page: u64, machine: &Machine) -> usize {
         }
         CPUS[n].hw_id.store(id as u64, Ordering::Relaxed);
         APIC_TO_CPU[id as usize].store(n as u8, Ordering::Relaxed);
-        let stack = alloc::vec![0u8; AP_STACK].leak();
-        tr_put(page, core::ptr::addr_of!(tr_stack), stack.as_mut_ptr().add(AP_STACK) as u64 & !15);
+        let top = crate::stack::Stack::new(AP_STACK).leak();
+        tr_put(page, core::ptr::addr_of!(tr_stack), top as u64);
         tr_put(page, core::ptr::addr_of!(tr_arg), n as u64);
         // INIT, then two SIPIs at the trampoline's page
         apic::send_ipi(id, 0x4500);
@@ -275,8 +275,8 @@ extern "sysv64" fn ap_main(n: usize) -> ! {
     unsafe {
         // the x87 and SSE state as a program starts with it
         core::arch::asm!("fninit", "push 0x1f80", "ldmxcsr [rsp]", "add rsp, 8");
-        apic::load_idt();
         apic::load_tss();
+        apic::load_idt();
         apic::lapic_init();
     }
     smp::cpu_main(n)

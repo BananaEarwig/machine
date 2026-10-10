@@ -146,8 +146,9 @@ pub unsafe fn build_idt() {
         *g = Gate {
             off_lo: handler as u16,
             selector: CODE_SELECTOR.load(Ordering::Relaxed) as u16,
-            // an interrupt on the CPU's own stack, an exception where it is
-            ist: if v >= 32 { 1 } else { 0 },
+            // an interrupt on the CPU's own stack, an exception on another,
+            // so that one from a stack that has overflowed can be reported
+            ist: if v >= 32 { 1 } else { 2 },
             attr: 0x8e, // present, ring 0, interrupt gate
             off_mid: (handler >> 16) as u16,
             off_hi: (handler >> 32) as u32,
@@ -177,8 +178,9 @@ struct Tss {
     iomap: u16,
 }
 
-/// the stack each CPU takes interrupts on
+/// the stacks each CPU takes interrupts and exceptions on
 const INTERRUPT_STACK: usize = 16 << 10;
+const EXCEPTION_STACK: usize = 16 << 10;
 
 /// This CPU's own GDT, a copy of the one it runs on with a TSS of its own
 /// after it, whose first IST stack, a stack of this CPU's, every
@@ -191,14 +193,14 @@ pub unsafe fn load_tss() {
     let n = (limit + 1) / 8;
     let gdt = alloc::vec![0u64; n + 2].leak();
     core::ptr::copy_nonoverlapping(base, gdt.as_mut_ptr(), n);
-    let stack = alloc::vec![0u8; INTERRUPT_STACK].leak();
-    let top = (stack.as_mut_ptr() as u64 + INTERRUPT_STACK as u64) & !15;
+    let top = crate::stack::Stack::new(INTERRUPT_STACK).leak() as u64;
+    let exception_top = crate::stack::Stack::new(EXCEPTION_STACK).leak() as u64;
     let size = core::mem::size_of::<Tss>() as u64;
     let tss = alloc::boxed::Box::leak(alloc::boxed::Box::new(Tss {
         reserved0: 0,
         rsp: [0; 3],
         reserved1: 0,
-        ist: [top, 0, 0, 0, 0, 0, 0],
+        ist: [top, exception_top, 0, 0, 0, 0, 0],
         reserved2: 0,
         reserved3: 0,
         iomap: size as u16,
@@ -325,6 +327,10 @@ extern "sysv64" fn exception_report(frame: *const u64) -> ! {
         f[4],
         cr2
     );
+    // a page fault, or the double fault one became, in a guard page
+    if (f[0] == 14 || f[0] == 8) && crate::stack::is_guard(cr2 as usize) {
+        crate::kprintln!("  a stack has overflowed: {:#x} is the guard page below it", cr2);
+    }
     cpu::exit(3)
 }
 
