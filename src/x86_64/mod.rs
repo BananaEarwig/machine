@@ -3,6 +3,7 @@
 //! (`apic.rs`), and the CPUs started with INIT, SIPI, SIPI (`start.rs`).
 
 mod apic;
+pub mod paging;
 mod ps2;
 mod start;
 
@@ -83,6 +84,11 @@ pub fn serial_put(b: u8) {
 }
 
 /// a byte from COM1, or from the PS/2 keyboard
+/// the PS/2 keyboard's layout, by name, as `ps2::set_layout` has them
+pub fn set_keyboard_layout(name: &str) -> bool {
+    ps2::set_layout(name)
+}
+
 pub fn serial_get() -> Option<u8> {
     unsafe {
         let lsr = inb(COM1 + 5);
@@ -169,13 +175,15 @@ pub fn firmware(rsdp: usize, unix_us: u64) -> Firmware {
 /// timer, and the other CPUs. Returns how many CPUs run.
 pub unsafe fn take_machine(fw: Firmware) -> usize {
     asm!("cli", options(nomem, nostack));
+    crate::stack::init();
     if let Some(p) = fw.low_page {
         let gdt = start::install_trampoline(p);
         apic::load_gdt(gdt);
     }
     apic::build_idt();
-    apic::load_idt();
+    // the TSS first: the IDT's gates name its stacks
     apic::load_tss();
+    apic::load_idt();
     apic::mask_pic();
     if let Some(m) = &fw.machine {
         for &io in &m.ioapics {

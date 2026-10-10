@@ -134,10 +134,9 @@ pub unsafe fn start_cpus(cpus: &[CpuInfo]) -> usize {
         b.vbar = mrs!("vbar_el1");
         b.entry = secondary_main as *const () as usize as u64;
         CPUS[n].hw_id.store(c.mpidr, Ordering::Relaxed);
-        let stack = alloc::vec![0u8; STACK].leak();
-        // 16-byte aligned, as the hardware checks it (SCTLR_EL1.SA); a
-        // vector of bytes need not be
-        b.stack = stack.as_mut_ptr().add(STACK) as u64 & !15;
+        // page aligned, so 16-byte aligned as the hardware checks it
+        // (SCTLR_EL1.SA), with a guard page below
+        b.stack = crate::stack::Stack::new(STACK).leak() as u64;
         b.arg = n as u64;
         clean_to_poc(b as *const BootBlock as usize, core::mem::size_of::<BootBlock>());
         let r = cpu_on(c.mpidr, code as u64, b as *const BootBlock as u64);
@@ -350,6 +349,10 @@ extern "C" fn exception_report(vector: u64, esr: u64, elr: u64, far: u64, sp: u6
         sp,
         far
     );
+    // a data abort in a guard page
+    if matches!(esr >> 26, 0x24 | 0x25) && crate::stack::is_guard(far as usize) {
+        crate::kprintln!("  a stack has overflowed: {:#x} is the guard page below it", far);
+    }
     cpu::exit(3)
 }
 

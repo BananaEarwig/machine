@@ -8,6 +8,7 @@
 //! which map all memory flat, and the devices.
 
 mod gic;
+pub mod paging;
 mod start;
 
 use crate::acpi;
@@ -107,6 +108,11 @@ pub fn serial_put(b: u8) {
         }
         uart_reg(UART_DR).write_volatile(b as u32);
     }
+}
+
+/// no PS/2 keyboard here
+pub fn set_keyboard_layout(_name: &str) -> bool {
+    false
 }
 
 pub fn serial_get() -> Option<u8> {
@@ -316,6 +322,7 @@ pub unsafe fn take_machine(fw: Firmware) -> usize {
         msr!("sctlr_el1", sctlr & !(1 << 19));
         asm!("isb", "tlbi vmalle1", "dsb nsh", "isb", options(nostack));
     }
+    crate::stack::init();
     crate::smp::boot_cpu(mpidr());
     let gic = fw.gicd != 0 && (fw.gic_version == 0 || fw.gic_version >= 3) && gic::init(fw.gicd, &fw.gicr_ranges, &fw.cpus);
     if gic {

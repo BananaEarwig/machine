@@ -27,6 +27,7 @@ machine = { path = "machine" }
 | --- | --- |
 | `boot` | the steps from the firmware to the machine: the heap, the boot disk's files, the time, a random seed, then leaving the firmware |
 | `cpu` | the console, a serial port, and the screen too when there is none; the clock, the CPU's counter; sleeping; random numbers; the way out |
+| `stack` | stacks with a guard page below, out of the map, on page tables of the machine's own, the heap in 4 KB pages; an overflow is reported as one |
 | `smp` | every CPU, each idle till `spawn` gives it a job; `call_on` and `unwind`, to run code on a stack of its own and leave it from anywhere in it |
 | `screen` | the console on the screen, for a machine with no serial port, a laptop: the firmware's text while it is there, then the framebuffer, in an 8x8 font, with the ANSI a TUI sends |
 | `display` | the screen, the firmware's GOP framebuffer in the mode asked for, or QEMU's ramfb at any size on AArch64 |
@@ -34,7 +35,7 @@ machine = { path = "machine" }
 | `virtio`, `virtio_input`, `virtio_blk`, `virtio_net` | virtio 1.0 on PCI, polled: the keyboard and tablet, as Linux input events; disks, by their serial, read and written at any offset; the network card, Ethernet frames in and out |
 | `ramfs` | a RAM disk unpacked from a ustar tar, with mtimes and modes; packed back whole, or just what changed since a point, as an overlay to put back over it |
 | `acpi` | finding the firmware's tables |
-| `plat` | what is the CPU's own: `x86_64/` (COM1, the PS/2 keyboard, the TSC, the GDT and IDT, the local APIC and its timer, INIT-SIPI-SIPI) and `aarch64/` (the PL011, the generic timer, the GICv3, PSCI, the exception vectors) |
+| `plat` | what is the CPU's own: `x86_64/` (COM1, the PS/2 keyboard in any of pc-keyboard's layouts, the page tables, the TSC, the GDT and IDT, the local APIC and its timer, INIT-SIPI-SIPI) and `aarch64/` (the PL011, the page tables, the generic timer, the GICv3, PSCI, the exception vectors) |
 
 `guest!` declares functions with the C convention of the code a kernel
 runs, which is not UEFI's own on x86_64: System V there, AAPCS64 on

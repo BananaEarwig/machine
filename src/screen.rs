@@ -2,6 +2,8 @@
 //! say: while the firmware is there, what is printed goes to its text
 //! output; once it has gone, it is drawn into the framebuffer, in an 8x8
 //! font (the `font8x8` crate's), doubled on a screen 1024 or more wide.
+//! Text is UTF-8: ASCII and Latin-1 are drawn, £ and é say, and any other
+//! character as a '?'.
 //!
 //! It is on when `boot::start` finds no serial port at COM1 (on x86_64;
 //! on AArch64 there is always the PL011 the firmware names), or when a
@@ -40,9 +42,12 @@ struct Text {
     rows: usize,
     x: usize,
     y: usize,
-    /// what is in each cell, so the screen can be drawn again when it scrolls
+    /// what is in each cell, a character up to U+00FF, so the screen can be
+    /// drawn again when it scrolls
     cells: Vec<u8>,
     escape: Escape,
+    /// a UTF-8 character so far, and how many bytes more it wants
+    utf8: (u32, u8),
 }
 
 static TEXT: spin::Mutex<Option<Text>> = spin::Mutex::new(None);
@@ -86,7 +91,7 @@ pub fn leaving_firmware() {
     let scale = if fb.width >= 1024 { 2 } else { 1 };
     let cols = fb.width / (8 * scale);
     let rows = fb.height / (8 * scale);
-    let mut t = Text { fb, scale, cols, rows, x: 0, y: 0, cells: vec![b' '; cols * rows], escape: Escape::None };
+    let mut t = Text { fb, scale, cols, rows, x: 0, y: 0, cells: vec![b' '; cols * rows], escape: Escape::None, utf8: (0, 0) };
     clear(&t);
     let early = EARLY.lock();
     for &b in &early.0[..early.1] {
@@ -173,8 +178,12 @@ fn clear(t: &Text) {
 impl Text {
     /// the cell at x, y drawn as it holds
     fn draw(&self, x: usize, y: usize) {
-        let c = self.cells[y * self.cols + x];
-        let glyph = if c < 128 { font8x8::legacy::BASIC_LEGACY[c as usize] } else { [0; 8] };
+        let c = self.cells[y * self.cols + x] as usize;
+        let glyph = match c {
+            0..=0x7f => font8x8::legacy::BASIC_LEGACY[c],
+            0xa0..=0xff => font8x8::legacy::LATIN_LEGACY[c - 0xa0],
+            _ => font8x8::legacy::BASIC_LEGACY[b'?' as usize],
+        };
         let s = self.scale;
         let fb = &self.fb;
         for (gy, &bits) in glyph.iter().enumerate() {
@@ -230,6 +239,27 @@ impl Text {
     }
 
     fn put(&mut self, b: u8) {
+        // the rest of a UTF-8 character
+        if self.utf8.1 > 0 {
+            if b & 0xc0 == 0x80 {
+                self.utf8 = (self.utf8.0 << 6 | (b & 0x3f) as u32, self.utf8.1 - 1);
+                if self.utf8.1 == 0 {
+                    let c = self.utf8.0;
+                    self.glyph(if (0xa0..=0xff).contains(&c) { c as u8 } else { b'?' });
+                }
+                return;
+            }
+            // not the rest: the bytes so far were not a character
+            self.utf8 = (0, 0);
+            self.glyph(b'?');
+        }
+        match b {
+            0xc0..=0xdf => return self.utf8 = ((b & 0x1f) as u32, 1),
+            0xe0..=0xef => return self.utf8 = ((b & 0x0f) as u32, 2),
+            0xf0..=0xf7 => return self.utf8 = ((b & 0x07) as u32, 3),
+            0x80..=0xff => return self.glyph(b'?'),
+            _ => {}
+        }
         match core::mem::replace(&mut self.escape, Escape::None) {
             Escape::Esc => {
                 if b == b'[' {
@@ -273,15 +303,18 @@ impl Text {
                     self.x += 1;
                 }
             }
-            0x20..=0x7e => {
-                if self.x >= self.cols {
-                    self.newline();
-                }
-                self.set(self.x, self.y, b);
-                self.x += 1;
-            }
+            0x20..=0x7e => self.glyph(b),
             _ => {}
         }
+    }
+
+    /// a character drawn at the cursor, which moves on
+    fn glyph(&mut self, c: u8) {
+        if self.x >= self.cols {
+            self.newline();
+        }
+        self.set(self.x, self.y, c);
+        self.x += 1;
     }
 
     /// a CSI sequence, its numbers and its last byte

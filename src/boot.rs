@@ -15,6 +15,7 @@ use uefi::{CString16, Status};
 #[global_allocator]
 static HEAP: LockedHeap = LockedHeap::empty();
 static HEAP_SIZE: AtomicUsize = AtomicUsize::new(0);
+static HEAP_BASE: AtomicUsize = AtomicUsize::new(0);
 static RSDP: AtomicUsize = AtomicUsize::new(0);
 
 /// what is free of the heap
@@ -25,6 +26,12 @@ pub fn heap_free() -> usize {
 /// the heap's size
 pub fn heap_size() -> usize {
     HEAP_SIZE.load(Ordering::Relaxed)
+}
+
+/// where the heap is, its first byte and the one after its last
+pub(crate) fn heap_range() -> (usize, usize) {
+    let b = HEAP_BASE.load(Ordering::Relaxed);
+    (b, b + HEAP_SIZE.load(Ordering::Relaxed))
 }
 
 /// the firmware's ACPI 2 RSDP, 0 if it has none
@@ -70,6 +77,7 @@ pub fn heap(margin: u64) -> Result<usize, Status> {
     })?;
     unsafe { HEAP.lock().init(heap.as_ptr(), heap_pages * 4096) };
     HEAP_SIZE.store(heap_pages * 4096, Ordering::Relaxed);
+    HEAP_BASE.store(heap.as_ptr() as usize, Ordering::Relaxed);
     kprintln!("[machine] heap {} MB at {:p}", (heap_pages * 4096) >> 20, heap.as_ptr());
     Ok(heap_pages * 4096)
 }

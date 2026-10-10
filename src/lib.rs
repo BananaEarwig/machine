@@ -8,7 +8,8 @@
 //!
 //! * the console, a serial port, or the screen if there is none, as on a
 //!   laptop (`screen`), and the clock, the CPU's counter (`cpu`);
-//! * every CPU, each idle till it is given a job (`smp`);
+//! * every CPU, each idle till it is given a job (`smp`), on page tables
+//!   of the machine's own, so that stacks have guard pages (`stack`);
 //! * interrupts only to wake an idle CPU, never in the middle of other code:
 //!   the local APIC on x86_64, the GICv3 on AArch64, and sleeps on their
 //!   timers; unless a kernel asks for a tick on a CPU (`cpu::start_tick`),
@@ -43,6 +44,7 @@ pub mod pci;
 pub mod ramfs;
 pub mod screen;
 pub mod smp;
+pub mod stack;
 pub mod virtio;
 pub mod virtio_blk;
 pub mod virtio_input;

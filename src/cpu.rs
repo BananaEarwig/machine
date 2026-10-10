@@ -25,6 +25,13 @@ pub fn console_write(bytes: &[u8]) {
 }
 
 /// a byte typed, if there is one, never waits
+/// The keyboard's layout, by name, us, uk, de and so on, for a machine's
+/// own keyboard, the PS/2 one on x86_64; false if it has none, or the name
+/// is not one.
+pub fn set_keyboard_layout(name: &str) -> bool {
+    plat::set_keyboard_layout(name)
+}
+
 pub fn serial_get() -> Option<u8> {
     plat::serial_get()
 }
