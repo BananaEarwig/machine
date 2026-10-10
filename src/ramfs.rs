@@ -1,13 +1,16 @@
 //! The files, all of them in memory. They are loaded at boot from a tar of
 //! the ChrysaLisp folder, and anything written is kept till the machine
-//! stops, there is no disk to write it back to yet.
+//! stops; or longer, if the kernel keeps what changed on a disk: once
+//! `start_tracking` is called, every file and folder made, written, or
+//! removed is noted, `save_overlay` is a tar of just those, with the
+//! removals, and `load_overlay` puts such a tar back over the files.
 //!
 //! A path is a key, as ChrysaLisp gives it with any "./" and trailing "/"
 //! taken off, so "apps/tui/tui.lisp". The root is the empty key. A folder
 //! is a key of its own, and what is in it is every key that is its key, a
 //! "/", and a name with no "/".
 
-use alloc::collections::BTreeMap;
+use alloc::collections::{BTreeMap, BTreeSet};
 use alloc::vec::Vec;
 
 /// no file is bigger than this, 1 GB
@@ -41,7 +44,18 @@ pub struct OpenFile {
 pub struct RamFs {
     entries: BTreeMap<Vec<u8>, Entry>,
     fds: Vec<Option<OpenFile>>,
+    /// noting changes, from `start_tracking` on
+    tracking: bool,
+    /// what has been made or written since, and is there
+    changed: BTreeSet<Vec<u8>>,
+    /// what has been removed since, and is not there
+    removed: BTreeSet<Vec<u8>>,
+    /// one more for each change noted
+    generation: u64,
 }
+
+/// the overlay's list of what was removed, a key a line
+const REMOVED: &[u8] = b".machine-removed";
 
 /// the key of a path
 pub fn normalize(path: &[u8]) -> Vec<u8> {
@@ -82,7 +96,92 @@ fn parent(key: &[u8]) -> Option<&[u8]> {
 
 impl RamFs {
     pub const fn new() -> Self {
-        RamFs { entries: BTreeMap::new(), fds: Vec::new() }
+        RamFs {
+            entries: BTreeMap::new(),
+            fds: Vec::new(),
+            tracking: false,
+            changed: BTreeSet::new(),
+            removed: BTreeSet::new(),
+            generation: 0,
+        }
+    }
+
+    ///////////////
+    // what changed, from a point on
+    ///////////////
+
+    /// note every change from now on: what is here now is the base
+    pub fn start_tracking(&mut self) {
+        self.tracking = true;
+    }
+
+    /// one more for each change since tracking started, so a kernel can
+    /// tell there is something new to keep
+    pub fn generation(&self) -> u64 {
+        self.generation
+    }
+
+    fn note_changed(&mut self, key: &[u8]) {
+        if self.tracking {
+            if !self.changed.contains(key) {
+                self.changed.insert(key.to_vec());
+            }
+            self.removed.remove(key);
+            self.generation += 1;
+        }
+    }
+
+    fn note_removed(&mut self, key: &[u8]) {
+        if self.tracking {
+            self.changed.remove(key);
+            self.removed.insert(key.to_vec());
+            self.generation += 1;
+        }
+    }
+
+    /// What changed since tracking started, as a ustar archive: every file
+    /// and folder made or written that is still there, and a file
+    /// `.machine-removed` with the keys of what was removed, one a line.
+    pub fn save_overlay(&self) -> Vec<u8> {
+        let mut list = Vec::new();
+        for k in &self.removed {
+            list.extend_from_slice(k);
+            list.push(b'\n');
+        }
+        let gone = Entry { node: Node::File(list), mtime: 0, perms: 0 };
+        let changed = self.changed.iter().filter_map(|k| self.entries.get(k).map(|e| (&k[..], e)));
+        tar_of(core::iter::once((REMOVED, &gone)).chain(changed))
+    }
+
+    /// Put an overlay back, as `save_overlay` made it: what it removed is
+    /// removed, then its files and folders are put over what is here. All
+    /// of it is noted as changed, so it is in the next overlay too. Returns
+    /// the files put and the keys removed, or None if it is not a tar.
+    pub fn load_overlay(&mut self, tar: &[u8]) -> Option<(usize, usize)> {
+        let mut o = RamFs::new();
+        o.load_tar(tar)?;
+        let list = o.file(REMOVED).map(|l| l.to_vec()).unwrap_or_default();
+        let mut removed = 0;
+        for k in list.split(|&c| c == b'\n').filter(|k| !k.is_empty()) {
+            self.remove(k);
+            self.note_removed(k);
+            removed += 1;
+        }
+        let mut files = 0;
+        for (k, e) in o.entries {
+            if k == REMOVED {
+                continue;
+            }
+            match e.node {
+                Node::Dir => self.make_dirs(&k, e.mtime),
+                Node::File(d) => {
+                    self.put_file(k.clone(), d, e.mtime);
+                    self.chmod(&k, e.perms);
+                    files += 1;
+                }
+            }
+        }
+        Some((files, removed))
     }
 
     pub fn count(&self) -> usize {
@@ -98,6 +197,7 @@ impl RamFs {
             k = parent(k).unwrap_or(b"");
         }
         for k in todo {
+            self.note_changed(&k);
             self.entries.insert(k, Entry { node: Node::Dir, mtime, perms: 0 });
         }
     }
@@ -107,6 +207,7 @@ impl RamFs {
         if let Some(p) = parent(&key) {
             self.make_dirs(p, mtime);
         }
+        self.note_changed(&key);
         self.entries.insert(key, Entry { node: Node::File(data), mtime, perms: 0 });
     }
 
@@ -144,6 +245,7 @@ impl RamFs {
         match self.entries.get_mut(key) {
             Some(e) => {
                 e.perms = mode & 0o7777;
+                self.note_changed(key);
                 true
             }
             None => false,
@@ -190,15 +292,18 @@ impl RamFs {
                 self.entries.range(prefix.clone()..).take_while(|(k, _)| k.starts_with(&prefix)).map(|(k, _)| k.clone()).collect();
             for k in gone {
                 self.entries.remove(&k);
+                self.note_removed(&k);
             }
         }
         self.entries.remove(key);
+        self.note_removed(key);
         true
     }
 
     pub fn unlink(&mut self, key: &[u8]) -> bool {
         if self.file(key).is_some() {
             self.entries.remove(key);
+            self.note_removed(key);
             true
         } else {
             false
@@ -246,11 +351,17 @@ impl RamFs {
         }
         let pos = match self.entries.get_mut(&key) {
             Some(Entry { node: Node::File(d), mtime, .. }) => {
-                if truncate {
+                let n = if truncate {
                     d.clear();
                     *mtime = now;
+                    0
+                } else {
+                    d.len()
+                };
+                if truncate {
+                    self.note_changed(&key);
                 }
-                d.len()
+                n
             }
             _ => {
                 self.put_file(key.clone(), Vec::new(), now);
@@ -295,6 +406,7 @@ impl RamFs {
         }
         data[pos..end].copy_from_slice(buf);
         *mtime = now;
+        self.note_changed(&key);
         self.fd(fd).unwrap().pos += buf.len();
         buf.len() as i64
     }
@@ -372,58 +484,63 @@ impl RamFs {
     /// long for ustar, over 255 bytes or with no '/' to split it at within
     /// 155 and 100, is left out.
     pub fn save_tar(&self) -> Vec<u8> {
-        fn octal(f: &mut [u8], v: u64) {
-            // digits, then a NUL, as GNU tar writes them
-            let n = f.len() - 1;
-            let mut v = v;
-            for i in (0..n).rev() {
-                f[i] = b'0' + (v & 7) as u8;
-                v >>= 3;
-            }
-            f[n] = 0;
-        }
-        let mut out = Vec::new();
-        for (key, e) in &self.entries {
-            let mut name = key.clone();
-            if matches!(e.node, Node::Dir) {
-                name.push(b'/');
-            }
-            let (prefix, base) = if name.len() <= 100 {
-                (&name[..0], &name[..])
-            } else {
-                // split at a '/' so the prefix is at most 155, the rest 100
-                match (0..name.len()).rev().find(|&i| name[i] == b'/' && i <= 155 && name.len() - i - 1 <= 100 && i + 1 < name.len()) {
-                    Some(i) => (&name[..i], &name[i + 1..]),
-                    None => continue,
-                }
-            };
-            let mut h = [0u8; 512];
-            h[..base.len()].copy_from_slice(base);
-            h[345..345 + prefix.len()].copy_from_slice(prefix);
-            let mode = if e.perms != 0 { e.perms as u64 } else if matches!(e.node, Node::Dir) { 0o755 } else { 0o644 };
-            octal(&mut h[100..108], mode);
-            octal(&mut h[108..116], 0);
-            octal(&mut h[116..124], 0);
-            let data: &[u8] = match &e.node {
-                Node::File(d) => d,
-                Node::Dir => &[],
-            };
-            octal(&mut h[124..136], data.len() as u64);
-            octal(&mut h[136..148], e.mtime.max(0) as u64);
-            h[156] = if matches!(e.node, Node::Dir) { b'5' } else { b'0' };
-            h[257..263].copy_from_slice(b"ustar\0");
-            h[263..265].copy_from_slice(b"00");
-            // the checksum, of the header with its own field as spaces
-            h[148..156].copy_from_slice(b"        ");
-            let sum: u64 = h.iter().map(|&b| b as u64).sum();
-            octal(&mut h[148..155], sum);
-            h[155] = b' ';
-            out.extend_from_slice(&h);
-            out.extend_from_slice(data);
-            out.resize(out.len().div_ceil(512) * 512, 0);
-        }
-        // the end, two blocks of zeros
-        out.resize(out.len() + 1024, 0);
-        out
+        tar_of(self.entries.iter().map(|(k, e)| (&k[..], e)))
     }
+}
+
+/// these entries as a ustar archive, as `save_tar` says
+fn tar_of<'a>(entries: impl Iterator<Item = (&'a [u8], &'a Entry)>) -> Vec<u8> {
+    fn octal(f: &mut [u8], v: u64) {
+        // digits, then a NUL, as GNU tar writes them
+        let n = f.len() - 1;
+        let mut v = v;
+        for i in (0..n).rev() {
+            f[i] = b'0' + (v & 7) as u8;
+            v >>= 3;
+        }
+        f[n] = 0;
+    }
+    let mut out = Vec::new();
+    for (key, e) in entries {
+        let mut name = key.to_vec();
+        if matches!(e.node, Node::Dir) {
+            name.push(b'/');
+        }
+        let (prefix, base) = if name.len() <= 100 {
+            (&name[..0], &name[..])
+        } else {
+            // split at a '/' so the prefix is at most 155, the rest 100
+            match (0..name.len()).rev().find(|&i| name[i] == b'/' && i <= 155 && name.len() - i - 1 <= 100 && i + 1 < name.len()) {
+                Some(i) => (&name[..i], &name[i + 1..]),
+                None => continue,
+            }
+        };
+        let mut h = [0u8; 512];
+        h[..base.len()].copy_from_slice(base);
+        h[345..345 + prefix.len()].copy_from_slice(prefix);
+        let mode = if e.perms != 0 { e.perms as u64 } else if matches!(e.node, Node::Dir) { 0o755 } else { 0o644 };
+        octal(&mut h[100..108], mode);
+        octal(&mut h[108..116], 0);
+        octal(&mut h[116..124], 0);
+        let data: &[u8] = match &e.node {
+            Node::File(d) => d,
+            Node::Dir => &[],
+        };
+        octal(&mut h[124..136], data.len() as u64);
+        octal(&mut h[136..148], e.mtime.max(0) as u64);
+        h[156] = if matches!(e.node, Node::Dir) { b'5' } else { b'0' };
+        h[257..263].copy_from_slice(b"ustar\0");
+        h[263..265].copy_from_slice(b"00");
+        // the checksum, of the header with its own field as spaces
+        h[148..156].copy_from_slice(b"        ");
+        let sum: u64 = h.iter().map(|&b| b as u64).sum();
+        octal(&mut h[148..155], sum);
+        h[155] = b' ';
+        out.extend_from_slice(&h);
+        out.extend_from_slice(data);
+        out.resize(out.len().div_ceil(512) * 512, 0);
+    }
+    // the end, two blocks of zeros
+    out.resize(out.len() + 1024, 0);
+    out
 }
