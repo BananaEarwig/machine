@@ -84,7 +84,8 @@ fn uart_reg(off: usize) -> *mut u32 {
 
 /// the UART the firmware's SPCR names, a PL011 or an SBSA one, which are
 /// the same for this; the firmware has set it going
-pub fn console_init(rsdp: usize) {
+/// always true: there is the UART the SPCR names, or QEMU's
+pub fn console_init(rsdp: usize) -> bool {
     unsafe {
         if let Some(spcr) = acpi::find(rsdp, b"SPCR") {
             let kind: u8 = acpi::rd(spcr, 36);
@@ -96,6 +97,7 @@ pub fn console_init(rsdp: usize) {
             }
         }
     }
+    true
 }
 
 pub fn serial_put(b: u8) {

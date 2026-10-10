@@ -3,6 +3,7 @@
 //! (`apic.rs`), and the CPUs started with INIT, SIPI, SIPI (`start.rs`).
 
 mod apic;
+mod ps2;
 mod start;
 
 use crate::cpu;
@@ -53,8 +54,14 @@ pub fn halt_forever() -> ! {
 
 const COM1: u16 = 0x3f8;
 
-pub fn console_init(_rsdp: usize) {
+/// COM1 set going; false if there is none, as on a laptop: its scratch
+/// register does not keep what is written to it
+pub fn console_init(_rsdp: usize) -> bool {
     unsafe {
+        outb(COM1 + 7, 0x5a);
+        if inb(COM1 + 7) != 0x5a {
+            return false;
+        }
         outb(COM1 + 1, 0x00); // no interrupts
         outb(COM1 + 3, 0x80); // divisor follows
         outb(COM1, 0x01); // 115200 baud
@@ -63,6 +70,7 @@ pub fn console_init(_rsdp: usize) {
         outb(COM1 + 2, 0xc7); // FIFO on, cleared
         outb(COM1 + 4, 0x03); // DTR and RTS
     }
+    true
 }
 
 pub fn serial_put(b: u8) {
@@ -74,14 +82,15 @@ pub fn serial_put(b: u8) {
     }
 }
 
+/// a byte from COM1, or from the PS/2 keyboard
 pub fn serial_get() -> Option<u8> {
     unsafe {
-        if inb(COM1 + 5) & 0x01 != 0 {
-            Some(inb(COM1))
-        } else {
-            None
+        let lsr = inb(COM1 + 5);
+        if lsr != 0xff && lsr & 0x01 != 0 {
+            return Some(inb(COM1));
         }
     }
+    ps2::get()
 }
 
 ///////////////
@@ -118,10 +127,14 @@ pub fn flush_icache(_addr: usize, _len: usize) {}
 // the way out
 ///////////////
 
-/// QEMU's isa-debug-exit device, if it is there, makes QEMU exit with
-/// (code << 1) | 1. On a machine it is not, and the CPU stops.
+/// QEMU's isa-debug-exit device makes QEMU exit with (code << 1) | 1. It
+/// is written to only on QEMU, its ACPI says; on a machine the CPU stops,
+/// and says so.
 pub fn exit(code: i32) -> ! {
-    unsafe { outl(0xf4, code as u32) };
+    if crate::acpi::oem_is(b"BOCHS ") {
+        unsafe { outl(0xf4, code as u32) };
+    }
+    crate::kprintln!("[machine] stopped, it can be switched off");
     halt_forever()
 }
 

@@ -6,7 +6,8 @@
 //! from, the time of day, a random seed and the screen (`boot`, `display`).
 //! Then it leaves the firmware for good and runs the machine itself:
 //!
-//! * the console, a serial port, and the clock, the CPU's counter (`cpu`);
+//! * the console, a serial port, or the screen if there is none, as on a
+//!   laptop (`screen`), and the clock, the CPU's counter (`cpu`);
 //! * every CPU, each idle till it is given a job (`smp`);
 //! * interrupts only to wake an idle CPU, never in the middle of other code:
 //!   the local APIC on x86_64, the GICv3 on AArch64, and sleeps on their
@@ -40,6 +41,7 @@ pub mod boot;
 pub mod display;
 pub mod pci;
 pub mod ramfs;
+pub mod screen;
 pub mod smp;
 pub mod virtio;
 pub mod virtio_blk;
