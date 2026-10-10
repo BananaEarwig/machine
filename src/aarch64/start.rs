@@ -135,7 +135,9 @@ pub unsafe fn start_cpus(cpus: &[CpuInfo]) -> usize {
         b.entry = secondary_main as *const () as usize as u64;
         CPUS[n].hw_id.store(c.mpidr, Ordering::Relaxed);
         let stack = alloc::vec![0u8; STACK].leak();
-        b.stack = stack.as_mut_ptr().add(STACK) as u64;
+        // 16-byte aligned, as the hardware checks it (SCTLR_EL1.SA); a
+        // vector of bytes need not be
+        b.stack = stack.as_mut_ptr().add(STACK) as u64 & !15;
         b.arg = n as u64;
         clean_to_poc(b as *const BootBlock as usize, core::mem::size_of::<BootBlock>());
         let r = cpu_on(c.mpidr, code as u64, b as *const BootBlock as u64);
@@ -338,8 +340,9 @@ const VECTOR_KINDS: [&str; 4] = ["synchronous", "IRQ", "FIQ", "SError"];
 #[no_mangle]
 extern "C" fn exception_report(vector: u64, esr: u64, elr: u64, far: u64, sp: u64) -> ! {
     crate::kprintln!(
-        "\n[machine] cpu {} {} exception, ESR {:#x} (class {:#x})\n  pc {:#x} sp {:#x} far {:#x}",
+        "\n[machine] cpu {} (MPIDR {:#x}) {} exception, ESR {:#x} (class {:#x})\n  pc {:#x} sp {:#x} far {:#x}",
         super::this_cpu(),
+        mrs!("mpidr_el1") & 0xff_00ff_ffff,
         VECTOR_KINDS[(vector & 3) as usize],
         esr,
         esr >> 26,
@@ -373,6 +376,8 @@ global_asm!(
     "stp d14, d15, [sp, #144]",
     "mov x9, sp",
     "str x9, [x4]",
+    // the stack given need not be aligned, the hardware wants 16
+    "and x0, x0, #~15",
     "sub x0, x0, #16",
     "str x9, [x0]",
     "mov sp, x0",

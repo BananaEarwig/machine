@@ -30,6 +30,29 @@ pub fn serial_get() -> Option<u8> {
 
 pub struct Console;
 
+/// what writes under the lock already held
+struct Locked;
+
+impl fmt::Write for Locked {
+    fn write_str(&mut self, s: &str) -> fmt::Result {
+        for &b in s.as_bytes() {
+            if b == b'\n' {
+                plat::serial_put(b'\r');
+            }
+            plat::serial_put(b);
+        }
+        Ok(())
+    }
+}
+
+/// a whole message, its line end with it, with no other CPU's in it
+pub fn console_print(args: fmt::Arguments) {
+    use fmt::Write;
+    let _g = CONSOLE.lock();
+    let _ = Locked.write_fmt(args);
+    let _ = Locked.write_str("\n");
+}
+
 impl fmt::Write for Console {
     fn write_str(&mut self, s: &str) -> fmt::Result {
         console_write(s.as_bytes());
@@ -40,8 +63,7 @@ impl fmt::Write for Console {
 #[macro_export]
 macro_rules! kprintln {
     ($($t:tt)*) => {{
-        use core::fmt::Write;
-        let _ = writeln!($crate::cpu::Console, $($t)*);
+        $crate::cpu::console_print(format_args!($($t)*));
     }};
 }
 

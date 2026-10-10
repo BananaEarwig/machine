@@ -246,7 +246,7 @@ pub unsafe fn start_cpus(page: u64, machine: &Machine) -> usize {
         CPUS[n].hw_id.store(id as u64, Ordering::Relaxed);
         APIC_TO_CPU[id as usize].store(n as u8, Ordering::Relaxed);
         let stack = alloc::vec![0u8; AP_STACK].leak();
-        tr_put(page, core::ptr::addr_of!(tr_stack), stack.as_mut_ptr().add(AP_STACK) as u64);
+        tr_put(page, core::ptr::addr_of!(tr_stack), stack.as_mut_ptr().add(AP_STACK) as u64 & !15);
         tr_put(page, core::ptr::addr_of!(tr_arg), n as u64);
         // INIT, then two SIPIs at the trampoline's page
         apic::send_ipi(id, 0x4500);
@@ -300,6 +300,9 @@ global_asm!(
     "push r15",
     "mov qword ptr [r8], rsp",
     "mov r15, r8",
+    // the stack given need not be aligned; the call below leaves it as
+    // the ABI has it at a function's entry
+    "and rdi, -16",
     "mov rsp, rdi",
     "mov rax, rsi",
     "mov rdi, rdx",
