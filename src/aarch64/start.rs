@@ -10,11 +10,11 @@ use super::{clean_to_poc, cpu_on, gic, mrs, msr, isb, set_this_cpu, CpuInfo};
 use crate::cpu;
 use crate::smp::{self, CPUS, MAX_CPUS};
 use core::arch::global_asm;
-use core::sync::atomic::Ordering;
+use core::sync::atomic::{AtomicU8, Ordering};
 
 /// What a CPU starting reads, with its MMU off, so it is cleaned to memory
 /// before each start. The offsets are the entry code's.
-#[repr(C, align(64))]
+#[repr(C, align(128))]
 struct BootBlock {
     mair: u64,   // 0
     tcr: u64,    // 8
@@ -26,19 +26,24 @@ struct BootBlock {
     stack: u64,  // 56
     entry: u64,  // 64
     arg: u64,    // 72
+    seen: u64,   // 80, how far it got with its MMU off, written by it
 }
 
 /// One for each CPU, so one that starts late reads its own, never the
 /// next one's.
 static mut BOOT: [BootBlock; MAX_CPUS] =
-    [const { BootBlock { mair: 0, tcr: 0, ttbr0: 0, ttbr1: 0, cpacr: 0, sctlr: 0, vbar: 0, stack: 0, entry: 0, arg: 0 } }; MAX_CPUS];
+    [const { BootBlock { mair: 0, tcr: 0, ttbr0: 0, ttbr1: 0, cpacr: 0, sctlr: 0, vbar: 0, stack: 0, entry: 0, arg: 0, seen: 0 } }; MAX_CPUS];
 
 global_asm!(
     ".balign 64",
     ".global secondary_entry",
     ".global secondary_entry_end",
     "secondary_entry:",
-    // x0 is the boot block
+    // x0 is the boot block; it is told this CPU got here, to memory, as
+    // its MMU is off
+    "mov x3, #1",
+    "str x3, [x0, #80]",
+    "dsb sy",
     "ldr x1, [x0, #0]",
     "msr mair_el1, x1",
     "ldr x1, [x0, #8]",
@@ -55,6 +60,9 @@ global_asm!(
     "tlbi vmalle1",
     "dsb nsh",
     "isb",
+    "mov x3, #2",
+    "str x3, [x0, #80]",
+    "dsb sy",
     "ldr x1, [x0, #40]",
     "msr sctlr_el1, x1",
     "isb",
@@ -75,6 +83,27 @@ extern "C" {
 }
 
 const STACK: usize = 64 << 10;
+
+/// How far each CPU has got, with its MMU on: 3 in Rust, 4 its GIC
+/// interface up; then it is online.
+static STAGE: [AtomicU8; MAX_CPUS] = [const { AtomicU8::new(0) }; MAX_CPUS];
+
+/// how far CPU n got, for a report: its boot block's word is read from
+/// memory, its cached copy dropped first
+unsafe fn reached(n: usize) -> &'static str {
+    let stage = STAGE[n].load(Ordering::Acquire);
+    let b = &(*core::ptr::addr_of!(BOOT))[n];
+    let seen = core::ptr::addr_of!(b.seen);
+    clean_to_poc(seen as usize, 8);
+    let seen = seen.read_volatile();
+    match (seen, stage) {
+        (_, 4) => "its GIC interface up, not yet online",
+        (_, 3) => "in Rust, starting its GIC interface",
+        (2, _) => "turning its MMU on",
+        (1, _) => "at its entry, MMU off",
+        _ => "not at its entry",
+    }
+}
 
 /// how long a CPU has to come up, from its CPU_ON, before it is asked
 /// again; and how many times it is asked
@@ -133,14 +162,14 @@ pub unsafe fn start_cpus(cpus: &[CpuInfo]) -> usize {
             }
             let ms = (cpu::now_us() - t0) / 1000;
             if attempt == TRIES {
-                crate::kprintln!("[machine] CPU {:#x} not up after {} ms, going on without it", c.mpidr, ms);
+                crate::kprintln!("[machine] CPU {:#x} not up after {} ms, {}, going on without it", c.mpidr, ms, reached(n));
                 continue;
             }
             // asked again: 0 if the first was lost, -4 ALREADY_ON if it
             // is running but not here yet, -5 ON_PENDING if still starting
             let b = &(*core::ptr::addr_of!(BOOT))[n];
             let r = cpu_on(c.mpidr, code as u64, b as *const BootBlock as u64);
-            crate::kprintln!("[machine] CPU {:#x} not up after {} ms, CPU_ON again: {}", c.mpidr, ms, r);
+            crate::kprintln!("[machine] CPU {:#x} not up after {} ms, {}, CPU_ON again: {}", c.mpidr, ms, reached(n), r);
         }
     }
     1 + up()
@@ -148,11 +177,13 @@ pub unsafe fn start_cpus(cpus: &[CpuInfo]) -> usize {
 
 /// where a CPU other than the boot one comes, with its MMU on
 extern "C" fn secondary_main(n: usize) -> ! {
+    STAGE[n].store(3, Ordering::Release);
     set_this_cpu(n);
     msr!("fpcr", 0);
     msr!("fpsr", 0);
     isb();
     unsafe { gic::init_cpu(n) };
+    STAGE[n].store(4, Ordering::Release);
     smp::cpu_main(n)
 }
 
@@ -184,10 +215,15 @@ macro_rules! vectors {
             "mrs x3, far_el1",
             "mov x4, sp",
             // the stack may be what went wrong, a stack of its own
+            // one for each CPU, by the low bits of its affinity, so that
+            // CPUs failing together do not share one
             "adrp x9, EXCEPTION_STACK",
             "add x9, x9, :lo12:EXCEPTION_STACK",
-            "add x9, x9, #4096",
-            "add x9, x9, #4096",
+            "mrs x10, mpidr_el1",
+            "and x10, x10, #15", // EXCEPTION_CPUS - 1
+            "add x10, x10, #1",
+            "lsl x10, x10, #13",
+            "add x9, x9, x10",
             "mov sp, x9",
             "bl exception_report",
             "2:",
@@ -281,8 +317,12 @@ extern "C" fn machine_irq() {
     super::gic::irq();
 }
 
+/// an exception stack for each CPU, 8 KB, by its affinity's low four bits
+const EXCEPTION_CPUS: usize = 16;
+#[repr(C, align(16))]
+struct ExceptionStacks([[u8; 8192]; EXCEPTION_CPUS]);
 #[no_mangle]
-static mut EXCEPTION_STACK: [u8; 8192] = [0; 8192];
+static mut EXCEPTION_STACK: ExceptionStacks = ExceptionStacks([[0; 8192]; EXCEPTION_CPUS]);
 
 extern "C" {
     static exception_vectors: u8;
