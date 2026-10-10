@@ -13,7 +13,8 @@
 //!   timers; unless a kernel asks for a tick on a CPU (`cpu::start_tick`),
 //!   a periodic interrupt whose handler runs in the middle of anything;
 //! * PCI, by the ACPI MCFG (`pci`), and virtio's keyboard, tablet, disks
-//!   and network card (`virtio_input`, `virtio_blk`, `virtio_net`);
+//!   network card and sound (`virtio_input`, `virtio_blk`, `virtio_net`,
+//!   `virtio_snd`);
 //! * a RAM disk unpacked from a tar (`ramfs`).
 //!
 //! What is the CPU's own is in `x86_64/` and `aarch64/`, as `plat`. It was
@@ -44,6 +45,7 @@ pub mod virtio;
 pub mod virtio_blk;
 pub mod virtio_input;
 pub mod virtio_net;
+pub mod virtio_snd;
 
 /// Functions code of the guest's own calls, a boot image's or a translated
 /// program's, with the C convention of the platform that code is built
