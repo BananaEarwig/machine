@@ -97,6 +97,26 @@ pub fn init(screen_txt: Option<&[u8]>) {
     FB.call_once(|| fb);
 }
 
+/// The screen as the firmware left it, its mode not changed: for the
+/// console on the screen, when no kernel has set it.
+pub fn current() {
+    let Ok(h) = boot::get_handle_for_protocol::<GraphicsOutput>() else { return };
+    let Ok(mut gop) = boot::open_protocol_exclusive::<GraphicsOutput>(h) else { return };
+    let info = gop.current_mode_info();
+    if !matches!(info.pixel_format(), PixelFormat::Rgb | PixelFormat::Bgr) {
+        return;
+    }
+    let (width, height) = info.resolution();
+    let fb = Framebuffer {
+        base: gop.frame_buffer().as_mut_ptr() as usize,
+        width,
+        height,
+        stride: info.stride(),
+        rgb: info.pixel_format() == PixelFormat::Rgb,
+    };
+    FB.call_once(|| fb);
+}
+
 /// QEMU's ramfb, on the AArch64 virt machine, set to a size of our own
 /// through fw_cfg, as its firmware driver does with a size of its own.
 #[cfg(target_arch = "aarch64")]

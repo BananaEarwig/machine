@@ -13,7 +13,6 @@ pub unsafe fn len(t: *const u8) -> usize {
 static RSDP_OEM: spin::Once<[u8; 6]> = spin::Once::new();
 
 /// is the firmware's ACPI from this OEM, "BOCHS " is QEMU's ?
-#[cfg_attr(not(target_arch = "aarch64"), allow(dead_code))]
 pub fn oem_is(oem: &[u8; 6]) -> bool {
     RSDP_OEM.get() == Some(oem)
 }

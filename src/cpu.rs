@@ -15,6 +15,7 @@ static CONSOLE: spin::Mutex<()> = spin::Mutex::new(());
 /// what a terminal is sent, a line end is a return as well, as a tty does
 pub fn console_write(bytes: &[u8]) {
     let _g = CONSOLE.lock();
+    crate::screen::write(bytes);
     for &b in bytes {
         if b == b'\n' {
             plat::serial_put(b'\r');
@@ -35,6 +36,7 @@ struct Locked;
 
 impl fmt::Write for Locked {
     fn write_str(&mut self, s: &str) -> fmt::Result {
+        crate::screen::write(s.as_bytes());
         for &b in s.as_bytes() {
             if b == b'\n' {
                 plat::serial_put(b'\r');

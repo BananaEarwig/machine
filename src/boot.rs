@@ -39,7 +39,8 @@ pub fn start(name: &str) -> usize {
         t.iter().find(|e| e.guid == uefi::table::cfg::ACPI2_GUID).map(|e| e.address as usize).unwrap_or(0)
     });
     RSDP.store(rsdp, Ordering::Relaxed);
-    plat::console_init(rsdp);
+    let serial = plat::console_init(rsdp);
+    crate::screen::init(serial);
     kprintln!("[{}] booting, {}", name, plat::NAME);
     rsdp
 }
@@ -118,6 +119,7 @@ pub fn prepare() -> plat::Firmware {
 /// CPUs run.
 pub unsafe fn take(fw: plat::Firmware) -> usize {
     kprintln!("[machine] leaving the firmware");
+    crate::screen::leaving_firmware();
     let _map = boot::exit_boot_services(None);
     let ncpus = plat::take_machine(fw);
     kprintln!("[machine] {} CPU{}, {}", ncpus, if ncpus == 1 { "" } else { "s" }, plat::describe());
