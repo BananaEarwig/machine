@@ -51,17 +51,25 @@ const STATUS_FEATURES_OK: u8 = 8;
 pub const DESC_NEXT: u16 = 1;
 pub const DESC_WRITE: u16 = 2;
 
-/// A device found, reset and its features agreed, VERSION_1 and no other.
+/// A device found, reset and its features agreed: VERSION_1, and those of
+/// the low 32 asked for that it has.
 pub struct Transport {
     common: usize,
     notify: usize,
     mult: usize,
     /// the device's own configuration
     pub device_cfg: usize,
+    /// the features of bits 0-31 agreed
+    pub features: u32,
 }
 
 impl Transport {
     pub unsafe fn new(f: &Function) -> Option<Transport> {
+        Self::with_features(f, 0)
+    }
+
+    /// as `new`, with the features of `low`, bits 0-31, the device has too
+    pub unsafe fn with_features(f: &Function, low: u32) -> Option<Transport> {
         f.enable();
         let (mut common, mut notify, mut device_cfg, mut mult) = (0, 0, 0, 0);
         for (id, at) in f.capabilities() {
@@ -92,15 +100,17 @@ impl Transport {
         if r32(common + DEVICE_FEATURE) & 1 == 0 {
             return None;
         }
+        w32(common + DEVICE_FEATURE_SELECT, 0);
+        let has = r32(common + DEVICE_FEATURE);
         w32(common + DRIVER_FEATURE_SELECT, 0);
-        w32(common + DRIVER_FEATURE, 0);
+        w32(common + DRIVER_FEATURE, has & low);
         w32(common + DRIVER_FEATURE_SELECT, 1);
         w32(common + DRIVER_FEATURE, 1);
         w8(common + DEVICE_STATUS, STATUS_ACK | STATUS_DRIVER | STATUS_FEATURES_OK);
         if r8(common + DEVICE_STATUS) & STATUS_FEATURES_OK == 0 {
             return None;
         }
-        Some(Transport { common, notify, mult, device_cfg })
+        Some(Transport { common, notify, mult, device_cfg, features: has & low })
     }
 
     /// queue `index`, of at most `max` descriptors, made and enabled
@@ -181,6 +191,11 @@ impl Queue {
 
     /// the head of the next chain the device has finished with, if any
     pub unsafe fn take(&mut self) -> Option<u16> {
+        self.take_len().map(|(id, _)| id)
+    }
+
+    /// the same, with the bytes the device wrote to it
+    pub unsafe fn take_len(&mut self) -> Option<(u16, u32)> {
         let idx = (self.used.add(2) as *const u16).read_volatile();
         if idx == self.last_used {
             return None;
@@ -188,7 +203,8 @@ impl Queue {
         fence(Ordering::SeqCst);
         let slot = self.last_used as usize % self.len;
         let id = (self.used.add(4 + slot * 8) as *const u32).read_volatile();
+        let len = (self.used.add(8 + slot * 8) as *const u32).read_volatile();
         self.last_used = self.last_used.wrapping_add(1);
-        Some(id as u16)
+        Some((id as u16, len))
     }
 }
