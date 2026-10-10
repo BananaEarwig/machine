@@ -10,7 +10,7 @@ use alloc::vec::Vec;
 use core::arch::asm;
 use uefi::boot::{self, AllocateType, MemoryType};
 
-pub use apic::{idle, nap_us, sleep_us};
+pub use apic::{idle, nap_us, sleep_us, start_tick};
 pub use start::{call_node, exit_node, this_cpu};
 
 pub const NAME: &str = "x86_64";
@@ -162,6 +162,7 @@ pub unsafe fn take_machine(fw: Firmware) -> usize {
     }
     apic::build_idt();
     apic::load_idt();
+    apic::load_tss();
     apic::mask_pic();
     if let Some(m) = &fw.machine {
         for &io in &m.ioapics {

@@ -17,7 +17,7 @@ use alloc::vec::Vec;
 use core::arch::asm;
 use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
-pub use gic::{idle, nap_us, sleep_us, wake};
+pub use gic::{idle, nap_us, sleep_us, start_tick, wake};
 pub use start::{call_node, exit_node};
 
 pub const NAME: &str = "aarch64";

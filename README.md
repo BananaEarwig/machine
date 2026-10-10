@@ -10,8 +10,9 @@ It is shared by two kernels:
   [ChrysaLisp-host](https://github.com/BananaEarwig/ChrysaLisp-host): a
   ChrysaLisp node on each CPU, its desktop on the screen, its exFAT on a
   disk.
-* **Imago's kernel**, in [imago](https://github.com/BananaEarwig/imago),
-  to come.
+* **Imago's kernel**, `bare/` of
+  [imago](https://github.com/BananaEarwig/imago): one Imago program as
+  machine code, its threads on every CPU, its links over the network.
 
 Both take it as a git submodule, and as a path dependency:
 
@@ -29,7 +30,7 @@ machine = { path = "machine" }
 | `smp` | every CPU, each idle till `spawn` gives it a job; `call_on` and `unwind`, to run code on a stack of its own and leave it from anywhere in it |
 | `display` | the screen, the firmware's GOP framebuffer in the mode asked for, or QEMU's ramfb at any size on AArch64 |
 | `pci` | PCI, by the ACPI MCFG |
-| `virtio`, `virtio_input`, `virtio_blk` | virtio 1.0 on PCI, polled: the keyboard and tablet, as Linux input events; disks, by their serial, read and written at any offset |
+| `virtio`, `virtio_input`, `virtio_blk`, `virtio_net` | virtio 1.0 on PCI, polled: the keyboard and tablet, as Linux input events; disks, by their serial, read and written at any offset; the network card, Ethernet frames in and out |
 | `ramfs` | a RAM disk unpacked from a ustar tar, with mtimes and modes |
 | `acpi` | finding the firmware's tables |
 | `plat` | what is the CPU's own: `x86_64/` (COM1, the TSC, the GDT and IDT, the local APIC and its timer, INIT-SIPI-SIPI) and `aarch64/` (the PL011, the generic timer, the GICv3, PSCI, the exception vectors) |
@@ -38,11 +39,20 @@ machine = { path = "machine" }
 runs, which is not UEFI's own on x86_64: System V there, AAPCS64 on
 AArch64.
 
-No interrupt handler ever runs in the middle of other code. On x86_64 a
-CPU takes interrupts only in a `sti; hlt` window; on AArch64 it waits in
-`wfi` with them masked, which a pending interrupt still wakes it from.
-Either way an idle CPU is idle, and the code it runs need not know about
-interrupts at all, its red zone included.
+No interrupt handler runs in the middle of other code, unless the kernel
+asks. On x86_64 a CPU takes interrupts only in a `sti; hlt` window; on
+AArch64 it waits in `wfi` with them masked, which a pending interrupt
+still wakes it from. Either way an idle CPU is idle, and the code it runs
+need not know about interrupts at all, its red zone included.
+
+A kernel that wants code run in the middle of whatever a CPU runs, to
+preempt it say, asks for the tick there: `cpu::start_tick(period_us,
+handler)`. That CPU then has interrupts on, and its timer is the tick's;
+it sleeps till the next tick or a wake. The handler must not allocate, nor
+wait for a lock the code it stopped may hold. On x86_64 every interrupt is
+taken on a stack of each CPU's own, its TSS's first IST stack, never on
+the stack of the code it stops; on AArch64 on the stack it finds, with
+every register, the SIMD ones too, saved.
 
 ## Using it
 

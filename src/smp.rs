@@ -23,6 +23,8 @@ pub struct Cpu {
     job: spin::Mutex<Option<Job>>,
     /// where unwind goes back to, the stack call_on left
     pub unwind_sp: AtomicU64,
+    /// it takes the tick, `cpu::start_tick`, with interrupts on
+    pub ticking: AtomicBool,
 }
 
 impl Cpu {
@@ -33,6 +35,7 @@ impl Cpu {
             running: AtomicBool::new(false),
             job: spin::Mutex::new(None),
             unwind_sp: AtomicU64::new(0),
+            ticking: AtomicBool::new(false),
         }
     }
 }

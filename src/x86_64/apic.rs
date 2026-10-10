@@ -5,6 +5,11 @@
 //! IPI. The rest of the time they are off, so no handler ever runs in the
 //! middle of ChrysaLisp's code, and the red zone it may use below its stack
 //! pointer is never written over.
+//!
+//! But on a CPU that takes the tick (`cpu::start_tick`): there they are
+//! on, the timer goes off every period, and its handler runs in the middle
+//! of anything. Every interrupt is taken on a stack of each CPU's own, the
+//! first IST stack of its TSS, never on the stack of the code it stops.
 
 use crate::cpu;
 use core::arch::{asm, global_asm};
@@ -12,6 +17,7 @@ use core::sync::atomic::{AtomicU64, Ordering};
 
 pub const VECTOR_TIMER: u8 = 0x20;
 pub const VECTOR_WAKE: u8 = 0x21;
+pub const VECTOR_TICK: u8 = 0x22;
 pub const VECTOR_SPURIOUS: u8 = 0xff;
 
 // the local APIC's registers, offsets from its base
@@ -30,6 +36,7 @@ const LAPIC_TIMER_CUR: usize = 0x390;
 const LAPIC_TIMER_DIV: usize = 0x3e0;
 
 const LVT_MASKED: u32 = 1 << 16;
+const LVT_PERIODIC: u32 = 1 << 17;
 
 static LAPIC_BASE: AtomicU64 = AtomicU64::new(0);
 /// the timer's ticks in a millisecond, divided by 16
@@ -126,6 +133,7 @@ pub fn current_cs() -> u16 {
 extern "C" {
     fn irq_ack();
     fn irq_spurious();
+    fn irq_tick();
     static isr_table: [u64; 32];
 }
 
@@ -138,7 +146,8 @@ pub unsafe fn build_idt() {
         *g = Gate {
             off_lo: handler as u16,
             selector: CODE_SELECTOR.load(Ordering::Relaxed) as u16,
-            ist: 0,
+            // an interrupt on the CPU's own stack, an exception where it is
+            ist: if v >= 32 { 1 } else { 0 },
             attr: 0x8e, // present, ring 0, interrupt gate
             off_mid: (handler >> 16) as u16,
             off_hi: (handler >> 32) as u32,
@@ -153,6 +162,55 @@ pub unsafe fn build_idt() {
         set(v, h);
     }
     set(VECTOR_SPURIOUS as usize, irq_spurious as *const () as usize as u64);
+    set(VECTOR_TICK as usize, irq_tick as *const () as usize as u64);
+}
+
+/// the task state segment, for its interrupt stacks
+#[repr(C, packed)]
+struct Tss {
+    reserved0: u32,
+    rsp: [u64; 3],
+    reserved1: u64,
+    ist: [u64; 7],
+    reserved2: u64,
+    reserved3: u16,
+    iomap: u16,
+}
+
+/// the stack each CPU takes interrupts on
+const INTERRUPT_STACK: usize = 16 << 10;
+
+/// This CPU's own GDT, a copy of the one it runs on with a TSS of its own
+/// after it, whose first IST stack, a stack of this CPU's, every
+/// interrupt is taken on. On each CPU, before it takes an interrupt.
+pub unsafe fn load_tss() {
+    let mut reg = [0u8; 10];
+    asm!("sgdt [{}]", in(reg) reg.as_mut_ptr(), options(nostack));
+    let limit = u16::from_le_bytes([reg[0], reg[1]]) as usize;
+    let base = u64::from_le_bytes(reg[2..10].try_into().unwrap()) as *const u64;
+    let n = (limit + 1) / 8;
+    let gdt = alloc::vec![0u64; n + 2].leak();
+    core::ptr::copy_nonoverlapping(base, gdt.as_mut_ptr(), n);
+    let stack = alloc::vec![0u8; INTERRUPT_STACK].leak();
+    let top = (stack.as_mut_ptr() as u64 + INTERRUPT_STACK as u64) & !15;
+    let size = core::mem::size_of::<Tss>() as u64;
+    let tss = alloc::boxed::Box::leak(alloc::boxed::Box::new(Tss {
+        reserved0: 0,
+        rsp: [0; 3],
+        reserved1: 0,
+        ist: [top, 0, 0, 0, 0, 0, 0],
+        reserved2: 0,
+        reserved3: 0,
+        iomap: size as u16,
+    }));
+    let b = tss as *const Tss as u64;
+    let l = size - 1;
+    // a 64-bit TSS descriptor, two entries: present, available
+    gdt[n] = (l & 0xffff) | (b & 0xff_ffff) << 16 | 0x89 << 40 | (l >> 16 & 0xf) << 48 | (b >> 24 & 0xff) << 56;
+    gdt[n + 1] = b >> 32;
+    let new = TableReg { limit: ((n + 2) * 8 - 1) as u16, base: gdt.as_ptr() as u64 };
+    asm!("lgdt [{}]", in(reg) &new, options(nostack, readonly));
+    asm!("ltr {:x}", in(reg) (n * 8) as u16, options(nostack));
 }
 
 /// load the IDT, on each CPU
@@ -174,7 +232,40 @@ global_asm!(
     ".global irq_spurious",
     "irq_spurious:",
     "iretq",
+    // the tick: what the handler, System V code, may change, saved, on
+    // the IST stack, which the CPU's push of five words leaves aligned
+    // once these nine are pushed
+    ".global irq_tick",
+    "irq_tick:",
+    "push rax",
+    "push rcx",
+    "push rdx",
+    "push rsi",
+    "push rdi",
+    "push r8",
+    "push r9",
+    "push r10",
+    "push r11",
+    "cld",
+    "call machine_tick",
+    "mov rax, qword ptr [rip + lapic_eoi_addr]",
+    "mov dword ptr [rax], 0",
+    "pop r11",
+    "pop r10",
+    "pop r9",
+    "pop r8",
+    "pop rdi",
+    "pop rsi",
+    "pop rdx",
+    "pop rcx",
+    "pop rax",
+    "iretq",
 );
+
+#[no_mangle]
+extern "sysv64" fn machine_tick() {
+    cpu::tick();
+}
 
 macro_rules! isr_stubs {
     ($($v:literal $err:literal),*) => {
@@ -298,15 +389,37 @@ pub fn timer_mhz() -> u64 {
     LAPIC_TICKS_PER_MS.load(Ordering::Relaxed) * 16 / 1000
 }
 
-/// sleep till the timer goes off, or another CPU wakes this one
+/// sleep till the timer goes off, or another CPU wakes this one; on a CPU
+/// that takes the tick, interrupts stay on
 fn halt() {
-    unsafe { asm!("sti", "hlt", "cli", options(nomem, nostack)) };
+    if cpu::ticking() {
+        unsafe { asm!("sti", "hlt", options(nomem, nostack)) };
+    } else {
+        unsafe { asm!("sti", "hlt", "cli", options(nomem, nostack)) };
+    }
+}
+
+/// The tick, every `period_us`, on this CPU, and interrupts on: the
+/// timer, periodic, is the tick's alone from now on.
+pub fn start_tick(period_us: u64) {
+    let per_ms = LAPIC_TICKS_PER_MS.load(Ordering::Relaxed).max(1);
+    let ticks = (period_us * per_ms / 1000).clamp(1, u32::MAX as u64) as u32;
+    lapic_write(LAPIC_LVT_TIMER, LVT_PERIODIC | VECTOR_TICK as u32);
+    lapic_write(LAPIC_TIMER_INIT, ticks);
+    unsafe { asm!("sti", options(nomem, nostack)) };
 }
 
 /// sleep this long, halted, not spinning, the CPU is idle
 pub fn sleep_us(us: u64) {
     let per_ms = LAPIC_TICKS_PER_MS.load(Ordering::Relaxed);
     let end = cpu::now_us() + us.max(1);
+    if cpu::ticking() {
+        // the tick wakes it, each period
+        while cpu::now_us() < end {
+            halt();
+        }
+        return;
+    }
     loop {
         let now = cpu::now_us();
         if now >= end {
@@ -330,6 +443,10 @@ pub fn sleep_us(us: u64) {
 /// another say: one halt, for a caller that looks again when it ends.
 pub fn nap_us(us: u64) {
     let per_ms = LAPIC_TICKS_PER_MS.load(Ordering::Relaxed);
+    if cpu::ticking() {
+        halt();
+        return;
+    }
     if per_ms == 0 {
         cpu::spin_us(us.min(1000));
         return;
