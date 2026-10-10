@@ -31,7 +31,7 @@ machine = { path = "machine" }
 | `display` | the screen, the firmware's GOP framebuffer in the mode asked for, or QEMU's ramfb at any size on AArch64 |
 | `pci` | PCI, by the ACPI MCFG |
 | `virtio`, `virtio_input`, `virtio_blk`, `virtio_net` | virtio 1.0 on PCI, polled: the keyboard and tablet, as Linux input events; disks, by their serial, read and written at any offset; the network card, Ethernet frames in and out |
-| `ramfs` | a RAM disk unpacked from a ustar tar, with mtimes and modes |
+| `ramfs` | a RAM disk unpacked from a ustar tar, with mtimes and modes; packed back whole, or just what changed since a point, as an overlay to put back over it |
 | `acpi` | finding the firmware's tables |
 | `plat` | what is the CPU's own: `x86_64/` (COM1, the TSC, the GDT and IDT, the local APIC and its timer, INIT-SIPI-SIPI) and `aarch64/` (the PL011, the generic timer, the GICv3, PSCI, the exception vectors) |
 
