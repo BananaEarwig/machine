@@ -366,4 +366,64 @@ impl RamFs {
         }
         Some(files)
     }
+
+    /// Everything, as a ustar archive that `load_tar` loads back, and tar
+    /// lists: folders and files, with their mtimes and modes. A path too
+    /// long for ustar, over 255 bytes or with no '/' to split it at within
+    /// 155 and 100, is left out.
+    pub fn save_tar(&self) -> Vec<u8> {
+        fn octal(f: &mut [u8], v: u64) {
+            // digits, then a NUL, as GNU tar writes them
+            let n = f.len() - 1;
+            let mut v = v;
+            for i in (0..n).rev() {
+                f[i] = b'0' + (v & 7) as u8;
+                v >>= 3;
+            }
+            f[n] = 0;
+        }
+        let mut out = Vec::new();
+        for (key, e) in &self.entries {
+            let mut name = key.clone();
+            if matches!(e.node, Node::Dir) {
+                name.push(b'/');
+            }
+            let (prefix, base) = if name.len() <= 100 {
+                (&name[..0], &name[..])
+            } else {
+                // split at a '/' so the prefix is at most 155, the rest 100
+                match (0..name.len()).rev().find(|&i| name[i] == b'/' && i <= 155 && name.len() - i - 1 <= 100 && i + 1 < name.len()) {
+                    Some(i) => (&name[..i], &name[i + 1..]),
+                    None => continue,
+                }
+            };
+            let mut h = [0u8; 512];
+            h[..base.len()].copy_from_slice(base);
+            h[345..345 + prefix.len()].copy_from_slice(prefix);
+            let mode = if e.perms != 0 { e.perms as u64 } else if matches!(e.node, Node::Dir) { 0o755 } else { 0o644 };
+            octal(&mut h[100..108], mode);
+            octal(&mut h[108..116], 0);
+            octal(&mut h[116..124], 0);
+            let data: &[u8] = match &e.node {
+                Node::File(d) => d,
+                Node::Dir => &[],
+            };
+            octal(&mut h[124..136], data.len() as u64);
+            octal(&mut h[136..148], e.mtime.max(0) as u64);
+            h[156] = if matches!(e.node, Node::Dir) { b'5' } else { b'0' };
+            h[257..263].copy_from_slice(b"ustar\0");
+            h[263..265].copy_from_slice(b"00");
+            // the checksum, of the header with its own field as spaces
+            h[148..156].copy_from_slice(b"        ");
+            let sum: u64 = h.iter().map(|&b| b as u64).sum();
+            octal(&mut h[148..155], sum);
+            h[155] = b' ';
+            out.extend_from_slice(&h);
+            out.extend_from_slice(data);
+            out.resize(out.len().div_ceil(512) * 512, 0);
+        }
+        // the end, two blocks of zeros
+        out.resize(out.len() + 1024, 0);
+        out
+    }
 }
