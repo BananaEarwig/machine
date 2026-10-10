@@ -276,6 +276,7 @@ extern "sysv64" fn ap_main(n: usize) -> ! {
         // the x87 and SSE state as a program starts with it
         core::arch::asm!("fninit", "push 0x1f80", "ldmxcsr [rsp]", "add rsp, 8");
         apic::load_idt();
+        apic::load_tss();
         apic::lapic_init();
     }
     smp::cpu_main(n)

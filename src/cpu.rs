@@ -107,6 +107,41 @@ pub fn nap_us(us: u64) {
     }
 }
 
+///////////////
+// the tick: a periodic interrupt on a CPU, for a kernel that wants code
+// run in the middle of whatever that CPU runs
+///////////////
+
+static TICK: AtomicU64 = AtomicU64::new(0);
+
+/// Take an interrupt every `period_us` on this CPU, from now on, and call
+/// `handler` in it: interrupts are on from here, on this CPU only, and it
+/// sleeps till the next tick or a wake, not on a timer of its own. The
+/// handler runs in the middle of anything this CPU does, kernel and guest
+/// code alike, on a stack of its own on x86_64 and on the one it finds on
+/// AArch64: it must not allocate, nor wait for a lock the code it
+/// interrupted may hold; `try_lock`, and skip a tick, instead. One handler
+/// for every CPU that ticks.
+pub fn start_tick(period_us: u64, handler: fn()) {
+    TICK.store(handler as usize as u64, Ordering::Release);
+    crate::smp::CPUS[crate::smp::this_cpu()].ticking.store(true, Ordering::Release);
+    plat::start_tick(period_us.max(10));
+}
+
+/// does this CPU take the tick ?
+pub fn ticking() -> bool {
+    crate::smp::CPUS[crate::smp::this_cpu()].ticking.load(Ordering::Acquire)
+}
+
+/// the platform's interrupt, at a tick: the kernel's handler
+pub(crate) fn tick() {
+    let h = TICK.load(Ordering::Acquire);
+    if h != 0 {
+        let f: fn() = unsafe { core::mem::transmute(h as usize) };
+        f();
+    }
+}
+
 /// wake CPU n, if it naps or idles
 pub fn wake(n: usize) {
     if n < crate::smp::cpus() {

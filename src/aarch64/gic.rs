@@ -6,12 +6,16 @@
 //! the SGI another CPU sends to wake it. It then acknowledges and ends what
 //! is pending, and carries on where it was. So no handler ever runs in the
 //! middle of ChrysaLisp's code.
+//!
+//! But on a CPU that takes the tick (`cpu::start_tick`): there IRQs are
+//! unmasked, the virtual timer is the tick's, set again each period, and
+//! `irq` handles it, and a wake, in the middle of anything.
 
 use super::{isb, mrs, msr, CpuInfo};
 use crate::cpu;
 use crate::smp::MAX_CPUS;
 use core::arch::asm;
-use core::sync::atomic::{AtomicUsize, Ordering};
+use core::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 
 /// the virtual timer's interrupt, a PPI
 const INTID_VTIMER: u32 = 27;
@@ -20,6 +24,8 @@ const INTID_WAKE: u32 = 1;
 
 /// each CPU's redistributor
 static GICR: [AtomicUsize; MAX_CPUS] = [const { AtomicUsize::new(0) }; MAX_CPUS];
+/// each ticking CPU's period, in the counter's ticks
+static PERIOD: [AtomicU64; MAX_CPUS] = [const { AtomicU64::new(0) }; MAX_CPUS];
 
 unsafe fn rd32(a: usize) -> u32 {
     (a as *const u32).read_volatile()
@@ -123,6 +129,50 @@ fn ack_all() {
     isb();
 }
 
+/// The tick, every `period_us`, on this CPU: the virtual timer is the
+/// tick's from now on, and IRQs are unmasked.
+pub fn start_tick(period_us: u64) {
+    let n = super::this_cpu();
+    let ticks = ((period_us as u128 * cpu::counter_hz() as u128 / 1_000_000) as u64).max(1);
+    PERIOD[n].store(ticks, Ordering::Relaxed);
+    msr!("cntv_cval_el0", super::counter() + ticks);
+    msr!("cntv_ctl_el0", 1);
+    isb();
+    unsafe { asm!("msr daifclr, #2", options(nomem, nostack)) };
+}
+
+/// An IRQ taken, on a CPU that ticks: the tick, its timer set for the next
+/// period, and its handler called; or a wake, which only had to wake it.
+pub fn irq() {
+    let iar = mrs!("s3_0_c12_c12_0"); // ICC_IAR1_EL1
+    let id = (iar & 0xff_ffff) as u32;
+    if (1020..1024).contains(&id) {
+        return;
+    }
+    if id == INTID_VTIMER {
+        let n = super::this_cpu();
+        let p = PERIOD[n].load(Ordering::Relaxed);
+        if p == 0 {
+            // a sleep's, not the tick's: off
+            msr!("cntv_ctl_el0", 0);
+        } else {
+            // the next period, from now if it has fallen behind
+            let next = mrs!("cntv_cval_el0") + p;
+            let now = super::counter();
+            msr!("cntv_cval_el0", if next > now { next } else { now + p });
+        }
+        isb();
+        msr!("s3_0_c12_c12_1", iar); // ICC_EOIR1_EL1
+        isb();
+        if p != 0 {
+            cpu::tick();
+        }
+        return;
+    }
+    msr!("s3_0_c12_c12_1", iar);
+    isb();
+}
+
 /// wait for an interrupt, which is not taken, then let it go
 fn halt() {
     unsafe { asm!("dsb sy", "wfi", options(nomem, nostack, preserves_flags)) };
@@ -132,6 +182,13 @@ fn halt() {
 pub fn sleep_us(us: u64) {
     let hz = cpu::counter_hz();
     let end = cpu::now_us() + us.max(1);
+    if cpu::ticking() {
+        // the tick wakes it, each period, and is taken
+        while cpu::now_us() < end {
+            halt();
+        }
+        return;
+    }
     loop {
         let now = cpu::now_us();
         if now >= end {
@@ -156,6 +213,10 @@ pub fn sleep_us(us: u64) {
 /// Sleep at most this long, or till anything wakes the CPU, an SGI from
 /// another say: one wfi, for a caller that looks again when it ends.
 pub fn nap_us(us: u64) {
+    if cpu::ticking() {
+        halt();
+        return;
+    }
     let ticks = (us.max(1) as u128 * cpu::counter_hz() as u128 / 1_000_000) as u64;
     msr!("cntv_cval_el0", super::counter() + ticks.max(1));
     msr!("cntv_ctl_el0", 1);
@@ -169,7 +230,9 @@ pub fn nap_us(us: u64) {
 /// idle till woken
 pub fn idle() {
     halt();
-    ack_all();
+    if !cpu::ticking() {
+        ack_all();
+    }
 }
 
 /// wake a CPU that is idle, by its MPIDR, with an SGI

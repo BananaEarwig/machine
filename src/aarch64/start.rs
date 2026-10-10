@@ -125,8 +125,9 @@ extern "C" fn secondary_main(n: usize) -> ! {
 }
 
 ///////////////
-// the exception vectors, any exception is a bug, it is reported and the
-// machine stops
+// the exception vectors: an IRQ is the tick's or a wake's, on a CPU that
+// takes the tick (`cpu::start_tick`); any other exception is a bug, it is
+// reported and the machine stops
 ///////////////
 
 macro_rules! vectors {
@@ -137,8 +138,13 @@ macro_rules! vectors {
             "exception_vectors:",
             $(
                 ".balign 128",
+                // an IRQ from this EL, on SP_EL0 or SP_ELx
+                concat!(".if ", $i, " == 1 || ", $i, " == 5"),
+                "b irq_entry",
+                ".else",
                 concat!("mov x0, #", $i),
                 "b vector_common",
+                ".endif",
             )*
             "vector_common:",
             "mrs x1, esr_el1",
@@ -160,6 +166,88 @@ macro_rules! vectors {
 }
 
 vectors!(0 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15);
+
+// An IRQ, on the stack it finds: everything the handler, Rust code with
+// the C convention, may change, saved, the floating point and SIMD
+// registers with them, and the return state.
+global_asm!(
+    "irq_entry:",
+    "sub sp, sp, #720",
+    "stp x0, x1, [sp, #0]",
+    "stp x2, x3, [sp, #16]",
+    "stp x4, x5, [sp, #32]",
+    "stp x6, x7, [sp, #48]",
+    "stp x8, x9, [sp, #64]",
+    "stp x10, x11, [sp, #80]",
+    "stp x12, x13, [sp, #96]",
+    "stp x14, x15, [sp, #112]",
+    "stp x16, x17, [sp, #128]",
+    "stp x18, x29, [sp, #144]",
+    "mrs x0, elr_el1",
+    "stp x30, x0, [sp, #160]",
+    "mrs x0, spsr_el1",
+    "mrs x1, fpsr",
+    "stp x0, x1, [sp, #176]",
+    "mrs x0, fpcr",
+    "str x0, [sp, #192]",
+    "stp q0, q1, [sp, #208]",
+    "stp q2, q3, [sp, #240]",
+    "stp q4, q5, [sp, #272]",
+    "stp q6, q7, [sp, #304]",
+    "stp q8, q9, [sp, #336]",
+    "stp q10, q11, [sp, #368]",
+    "stp q12, q13, [sp, #400]",
+    "stp q14, q15, [sp, #432]",
+    "stp q16, q17, [sp, #464]",
+    "stp q18, q19, [sp, #496]",
+    "stp q20, q21, [sp, #528]",
+    "stp q22, q23, [sp, #560]",
+    "stp q24, q25, [sp, #592]",
+    "stp q26, q27, [sp, #624]",
+    "stp q28, q29, [sp, #656]",
+    "stp q30, q31, [sp, #688]",
+    "bl machine_irq",
+    "ldp q0, q1, [sp, #208]",
+    "ldp q2, q3, [sp, #240]",
+    "ldp q4, q5, [sp, #272]",
+    "ldp q6, q7, [sp, #304]",
+    "ldp q8, q9, [sp, #336]",
+    "ldp q10, q11, [sp, #368]",
+    "ldp q12, q13, [sp, #400]",
+    "ldp q14, q15, [sp, #432]",
+    "ldp q16, q17, [sp, #464]",
+    "ldp q18, q19, [sp, #496]",
+    "ldp q20, q21, [sp, #528]",
+    "ldp q22, q23, [sp, #560]",
+    "ldp q24, q25, [sp, #592]",
+    "ldp q26, q27, [sp, #624]",
+    "ldp q28, q29, [sp, #656]",
+    "ldp q30, q31, [sp, #688]",
+    "ldr x0, [sp, #192]",
+    "msr fpcr, x0",
+    "ldp x0, x1, [sp, #176]",
+    "msr spsr_el1, x0",
+    "msr fpsr, x1",
+    "ldp x30, x0, [sp, #160]",
+    "msr elr_el1, x0",
+    "ldp x18, x29, [sp, #144]",
+    "ldp x16, x17, [sp, #128]",
+    "ldp x14, x15, [sp, #112]",
+    "ldp x12, x13, [sp, #96]",
+    "ldp x10, x11, [sp, #80]",
+    "ldp x8, x9, [sp, #64]",
+    "ldp x6, x7, [sp, #48]",
+    "ldp x4, x5, [sp, #32]",
+    "ldp x2, x3, [sp, #16]",
+    "ldp x0, x1, [sp, #0]",
+    "add sp, sp, #720",
+    "eret",
+);
+
+#[no_mangle]
+extern "C" fn machine_irq() {
+    super::gic::irq();
+}
 
 #[no_mangle]
 static mut EXCEPTION_STACK: [u8; 8192] = [0; 8192];

@@ -10,7 +10,8 @@
 //! * every CPU, each idle till it is given a job (`smp`);
 //! * interrupts only to wake an idle CPU, never in the middle of other code:
 //!   the local APIC on x86_64, the GICv3 on AArch64, and sleeps on their
-//!   timers;
+//!   timers; unless a kernel asks for a tick on a CPU (`cpu::start_tick`),
+//!   a periodic interrupt whose handler runs in the middle of anything;
 //! * PCI, by the ACPI MCFG (`pci`), and virtio's keyboard, tablet, disks
 //!   and network card (`virtio_input`, `virtio_blk`, `virtio_net`);
 //! * a RAM disk unpacked from a tar (`ramfs`).
