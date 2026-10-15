@@ -56,7 +56,7 @@ impl Disk {
         // an interrupt, for a disk that is kept, one with a serial
         if !d.name.is_empty() {
             if let Some(irq) = t.interrupt(f) {
-                if t.listen(&d.queue) {
+                if t.listen(&d.queue, &irq) {
                     d.irq = Some(irq);
                 }
             }

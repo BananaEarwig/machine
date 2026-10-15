@@ -64,12 +64,13 @@ impl Net {
         rx.notify();
         // frames that come wake a CPU; frames sent are seen to when a
         // buffer is wanted, and wake none
-        let irq = t.interrupt(f).filter(|_| t.listen(&rx));
+        let irq = t.interrupt(f).filter(|i| t.listen(&rx, i));
         Some(Net { mac, rx, tx, rx_bufs, tx_bufs, tx_busy: 0, tx_next: 0, irq })
     }
 
     /// The interrupt that wakes a CPU when a frame has come, if there is
-    /// one, for the kernel to route and rearm (`irq`); then it is polled.
+    /// one, for the kernel to claim for a CPU about to sleep, and release
+    /// when it wakes (`irq`); then it is polled.
     pub fn take_irq(&mut self) -> Option<Irq> {
         self.irq.take()
     }

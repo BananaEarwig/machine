@@ -55,7 +55,7 @@ const STATUS_FEATURES_OK: u8 = 8;
 /// no MSI-X vector
 const NO_VECTOR: u16 = 0xffff;
 /// the available ring's flag that asks the device for no interrupts
-const AVAIL_NO_INTERRUPT: u16 = 1;
+pub(crate) const AVAIL_NO_INTERRUPT: u16 = 1;
 
 /// descriptor flags
 pub const DESC_NEXT: u16 = 1;
@@ -170,9 +170,10 @@ impl Transport {
     }
 
     /// The interrupt `interrupt` gave, for this queue's news too: its
-    /// MSI-X vector, if it is a message, and no longer quiet. False if the
-    /// device would not have it, and the queue stays polled.
-    pub unsafe fn listen(&self, q: &Queue) -> bool {
+    /// MSI-X vector, if it is a message, and no longer quiet, till the
+    /// interrupt is released (`Irq::release`). False if the device would
+    /// not have it, and the queue stays polled.
+    pub unsafe fn listen(&self, q: &Queue, irq: &Irq) -> bool {
         let v = self.vector.get();
         if v != NO_VECTOR {
             w16(self.common + QUEUE_SELECT, q.index);
@@ -181,6 +182,7 @@ impl Transport {
                 return false;
             }
         }
+        irq.add_queue(q.avail as usize);
         q.avail.write_volatile(0);
         fence(Ordering::SeqCst);
         true

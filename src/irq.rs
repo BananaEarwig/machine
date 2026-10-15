@@ -17,15 +17,25 @@
 //!   is polled.
 //!
 //! A device that has neither has no `Irq`, and is polled, as before.
+//!
+//! A device that is busy while its CPU is too would interrupt it for
+//! nothing, each time, which under a hypervisor costs it an exit or more:
+//! a kernel claims the interrupt for a CPU about to sleep, and releases
+//! it when the CPU wakes, and meanwhile the queues ask the device for none
+//! (VIRTQ_AVAIL_F_NO_INTERRUPT), as NAPI does in Linux.
 
 use crate::{plat, smp};
 use core::sync::atomic::{AtomicUsize, Ordering};
 
 pub struct Irq {
     how: How,
-    /// the CPU it is routed to; the lock is held while it is changed
+    /// the CPU it is routed to; the lock is held while it, or whether the
+    /// queues ask for interrupts, is changed
     cpu: spin::Mutex<usize>,
     seen: AtomicUsize,
+    /// the flags words of the queues' available rings, which say whether
+    /// the device is to interrupt (`claim`, `release`)
+    queues: spin::Mutex<alloc::vec::Vec<usize>>,
 }
 
 enum How {
@@ -37,11 +47,11 @@ enum How {
 
 impl Irq {
     pub(crate) fn msix(entry: usize, cpu: usize) -> Irq {
-        Irq { how: How::Msix(entry), cpu: spin::Mutex::new(cpu), seen: AtomicUsize::new(cpu) }
+        Irq { how: How::Msix(entry), cpu: spin::Mutex::new(cpu), seen: AtomicUsize::new(cpu), queues: spin::Mutex::new(alloc::vec::Vec::new()) }
     }
 
     pub(crate) fn line(intid: u32, isr: usize, cpu: usize) -> Irq {
-        Irq { how: How::Line(intid, isr), cpu: spin::Mutex::new(cpu), seen: AtomicUsize::new(cpu) }
+        Irq { how: How::Line(intid, isr), cpu: spin::Mutex::new(cpu), seen: AtomicUsize::new(cpu), queues: spin::Mutex::new(alloc::vec::Vec::new()) }
     }
 
     /// the CPU it wakes
@@ -57,6 +67,10 @@ impl Irq {
             return;
         }
         let mut c = self.cpu.lock();
+        self.route_locked(&mut c, n);
+    }
+
+    fn route_locked(&self, c: &mut usize, n: usize) {
         if *c == n {
             return;
         }
@@ -67,6 +81,40 @@ impl Irq {
         }
         *c = n;
         self.seen.store(n, Ordering::Release);
+    }
+
+    pub(crate) fn add_queue(&self, avail: usize) {
+        self.queues.lock().push(avail);
+    }
+
+    fn ask(&self, flags: u16) {
+        for &a in self.queues.lock().iter() {
+            unsafe { (a as *mut u16).write_volatile(flags) };
+        }
+        core::sync::atomic::fence(Ordering::SeqCst);
+    }
+
+    /// For a CPU about to sleep till the device has something: routed to
+    /// it, and the queues asking for interrupts again. It looks at the
+    /// device after, as what came before may have come with none.
+    pub fn claim(&self, n: usize) {
+        if n >= smp::cpus() {
+            return;
+        }
+        let mut c = self.cpu.lock();
+        self.route_locked(&mut c, n);
+        self.ask(0);
+    }
+
+    /// The CPU it is routed to, awake, will look at the device when it
+    /// next waits: the queues ask for no interrupts meanwhile, which would
+    /// only stop it, so a busy device costs none. Nothing if it has been
+    /// routed to another since.
+    pub fn release(&self, n: usize) {
+        let c = self.cpu.lock();
+        if *c == n {
+            self.ask(crate::virtio::AVAIL_NO_INTERRUPT);
+        }
     }
 
     /// Ready to wake a CPU again, before the driver looks at the device: a
