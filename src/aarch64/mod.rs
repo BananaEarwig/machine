@@ -18,7 +18,7 @@ use alloc::vec::Vec;
 use core::arch::asm;
 use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
-pub use gic::{idle, nap_us, sleep_us, start_tick, wake};
+pub use gic::{idle, line_enable, line_route, nap_us, sleep_us, start_tick, wake};
 pub use start::{call_node, exit_node};
 
 pub const NAME: &str = "aarch64";
@@ -336,6 +336,29 @@ pub unsafe fn take_machine(fw: Firmware) -> usize {
         crate::smp::set_cpus(1);
         1
     }
+}
+
+///////////////
+// interrupts from devices (`irq`): PCI lines, as there are no MSIs
+// without an ITS
+///////////////
+
+/// no MSIs
+pub fn msi_message(_mpidr: u64) -> Option<(u64, u32)> {
+    None
+}
+
+pub unsafe fn msi_route(_entry: usize, _mpidr: u64) {}
+
+/// A PCI device's line, as a GIC INTID, on QEMU's virt machine: its lines
+/// A to D are SPIs 3 to 6, turned by the device's slot, for a device on
+/// the first bus. Elsewhere ACPI's _PRT says, which is AML: None.
+pub fn pci_line(f: &crate::pci::Function) -> Option<u32> {
+    let pin = f.read8(0x3d) as u32;
+    if !acpi::oem_is(b"BOCHS ") || f.bus != 0 || !(1..=4).contains(&pin) {
+        return None;
+    }
+    Some(32 + 3 + (pin - 1 + f.slot as u32) % 4)
 }
 
 pub fn describe() -> String {

@@ -11,6 +11,9 @@ pub struct Function {
     pub cfg: usize,
     pub vendor: u16,
     pub device: u16,
+    /// its bus, and its device's number on the bus, its slot
+    pub bus: u8,
+    pub slot: u8,
 }
 
 impl Function {
@@ -74,7 +77,7 @@ pub fn scan(rsdp: usize) -> Vec<Function> {
             for dev in 0..32usize {
                 for func in 0..8usize {
                     let cfg = base as usize + ((bus as usize) << 20 | dev << 15 | func << 12);
-                    let f = Function { cfg, vendor: 0, device: 0 };
+                    let f = Function { cfg, vendor: 0, device: 0, bus, slot: dev as u8 };
                     let vendor = f.read16(0);
                     if vendor == 0xffff {
                         if func == 0 {
@@ -82,7 +85,7 @@ pub fn scan(rsdp: usize) -> Vec<Function> {
                         }
                         continue;
                     }
-                    found.push(Function { cfg, vendor, device: f.read16(2) });
+                    found.push(Function { device: f.read16(2), vendor, ..f });
                     // not a multi-function device, no more to look at
                     if func == 0 && f.read8(0x0e) & 0x80 == 0 {
                         break;

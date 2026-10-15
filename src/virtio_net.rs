@@ -1,9 +1,11 @@
 //! The network card: a virtio-net device on PCI, QEMU's virtio-net-pci,
 //! the same on x86_64 and AArch64. It moves Ethernet frames, whole, one to
 //! a buffer: a queue of buffers the device fills with what arrives, and a
-//! queue of frames to send. Polled, as the other virtio devices are; what
-//! speaks IP and TCP over it is the kernel's.
+//! queue of frames to send. What arrives wakes a CPU, by an interrupt the
+//! kernel routes (`irq`), where there is a way, and is polled; what speaks
+//! IP and TCP over it is the kernel's.
 
+use crate::irq::Irq;
 use crate::pci;
 use crate::virtio::{r8, Queue, Transport, DESC_WRITE};
 use alloc::alloc::{alloc_zeroed, Layout};
@@ -31,6 +33,8 @@ pub struct Net {
     tx_busy: u64,
     /// the next send buffer to try
     tx_next: usize,
+    /// what wakes a CPU when a frame has come, till the kernel takes it
+    irq: Option<Irq>,
 }
 
 unsafe impl Send for Net {}
@@ -58,7 +62,17 @@ impl Net {
         }
         t.ready();
         rx.notify();
-        Some(Net { mac, rx, tx, rx_bufs, tx_bufs, tx_busy: 0, tx_next: 0 })
+        // frames that come wake a CPU; frames sent are seen to when a
+        // buffer is wanted, and wake none
+        let irq = t.interrupt(f).filter(|i| t.listen(&rx, i));
+        Some(Net { mac, rx, tx, rx_bufs, tx_bufs, tx_busy: 0, tx_next: 0, irq })
+    }
+
+    /// The interrupt that wakes a CPU when a frame has come, if there is
+    /// one, for the kernel to claim for a CPU about to sleep, and release
+    /// when it wakes (`irq`); then it is polled.
+    pub fn take_irq(&mut self) -> Option<Irq> {
+        self.irq.take()
     }
 
     /// The next frame that has come, to `f`, its buffer given back to the

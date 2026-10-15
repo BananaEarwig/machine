@@ -1,9 +1,11 @@
 //! Disks: virtio-blk devices on PCI, read and written a request at a time,
-//! polled to the end. A disk is given to ChrysaLisp as a file, `dev/` and
-//! its serial number, as QEMU's `-device virtio-blk-pci,serial=data` has it,
+//! waited for to the end: asleep till the disk's interrupt, which the
+//! request routes to its own CPU, if it has one (`irq`), else polled. A
+//! disk is given to ChrysaLisp as a file, `dev/` and its serial number, as QEMU's `-device virtio-blk-pci,serial=data` has it,
 //! so ChrysaLisp's own exFAT or FAT32 can mount it. A disk with no serial,
 //! the one this was booted from, is left alone.
 
+use crate::irq::Irq;
 use crate::pci;
 use crate::virtio::{r32, Queue, Transport, DESC_NEXT, DESC_WRITE};
 use alloc::alloc::{alloc_zeroed, Layout};
@@ -26,6 +28,8 @@ pub struct Disk {
     /// the request's header at 0, its status at 16
     req: *mut u8,
     bounce: *mut u8,
+    /// the interrupt that ends a wait, if there is one
+    irq: Option<Irq>,
 }
 
 unsafe impl Send for Disk {}
@@ -42,18 +46,31 @@ impl Disk {
         }
         // the capacity, in sectors, is the first of its configuration
         let sectors = r32(t.device_cfg) as u64 | (r32(t.device_cfg + 4) as u64) << 32;
-        let mut d = Disk { name: String::new(), size: sectors * SECTOR, queue, req, bounce };
+        let mut d = Disk { name: String::new(), size: sectors * SECTOR, queue, req, bounce, irq: None };
         // its serial, NUL padded
         if d.request(T_GET_ID, 0, 20, false) {
             let id = core::slice::from_raw_parts(d.bounce, 20);
             let n = id.iter().position(|&b| b == 0).unwrap_or(20);
             d.name = String::from_utf8_lossy(&id[..n]).into_owned();
         }
+        // an interrupt, for a disk that is kept, one with a serial
+        if !d.name.is_empty() {
+            if let Some(irq) = t.interrupt(f) {
+                if t.listen(&d.queue, &irq) {
+                    d.irq = Some(irq);
+                }
+            }
+        }
         Some(d)
     }
 
     /// one request, of `len` bytes from or to the bounce buffer, done
     unsafe fn request(&mut self, kind: u32, sector: u64, len: usize, write: bool) -> bool {
+        // the interrupt to this CPU, and ready, before the disk can answer
+        if let Some(irq) = &self.irq {
+            irq.route(crate::smp::this_cpu());
+            irq.rearm();
+        }
         let q = &mut self.queue;
         (self.req as *mut u32).write(kind);
         (self.req.add(4) as *mut u32).write(0);
@@ -68,7 +85,16 @@ impl Disk {
             if q.take().is_some() {
                 break;
             }
-            core::hint::spin_loop();
+            if self.irq.is_some() {
+                // a millisecond at most, should the interrupt not come
+                crate::cpu::nap_us(1000);
+            } else {
+                core::hint::spin_loop();
+            }
+        }
+        // the line down again, so that it does not hold up another's
+        if let Some(irq) = &self.irq {
+            irq.rearm();
         }
         self.req.add(16).read_volatile() == 0
     }
@@ -130,7 +156,8 @@ pub fn init(funcs: &[pci::Function]) -> usize {
         if f.vendor == 0x1af4 && (f.device == 0x1001 || f.device == 0x1042) {
             if let Some(d) = unsafe { Disk::new(f) } {
                 if !d.name.is_empty() {
-                    crate::kprintln!("[machine] disk dev/{}, {} MB", d.name, d.size >> 20);
+                    let how = d.irq.as_ref().map_or(alloc::string::String::from("polled"), |i| i.describe());
+                    crate::kprintln!("[machine] disk dev/{}, {} MB, {}", d.name, d.size >> 20, how);
                     disks.push(d);
                 }
             }

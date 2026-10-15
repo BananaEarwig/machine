@@ -32,7 +32,8 @@ machine = { path = "machine" }
 | `screen` | the console on the screen, for a machine with no serial port, a laptop: the firmware's text while it is there, then the framebuffer, in an 8x8 font, with the ANSI a TUI sends |
 | `display` | the screen, the firmware's GOP framebuffer in the mode asked for, or QEMU's ramfb at any size on AArch64 |
 | `pci` | PCI, by the ACPI MCFG |
-| `virtio`, `virtio_input`, `virtio_blk`, `virtio_net` | virtio 1.0 on PCI, polled: the keyboard and tablet, as Linux input events; disks, by their serial, read and written at any offset; the network card, Ethernet frames in and out |
+| `virtio`, `virtio_input`, `virtio_blk`, `virtio_net` | virtio 1.0 on PCI: the keyboard and tablet, as Linux input events, polled; disks, by their serial, read and written at any offset, a request waited for asleep till the disk's interrupt; the network card, Ethernet frames in and out, with an interrupt for the kernel to route to a CPU that waits |
+| `irq` | interrupts from devices, that only wake a CPU: an MSI-X message on x86_64, the PCI line on QEMU's AArch64 virt machine, routed to one CPU at a time; a device with neither is polled |
 | `ramfs` | a RAM disk unpacked from a ustar tar, with mtimes and modes; packed back whole, or just what changed since a point, as an overlay to put back over it |
 | `acpi` | finding the firmware's tables |
 | `plat` | what is the CPU's own: `x86_64/` (COM1, the PS/2 keyboard in any of pc-keyboard's layouts, the page tables, the TSC, the GDT and IDT, the local APIC and its timer, INIT-SIPI-SIPI) and `aarch64/` (the PL011, the page tables, the generic timer, the GICv3, PSCI, the exception vectors) |
@@ -46,6 +47,17 @@ asks. On x86_64 a CPU takes interrupts only in a `sti; hlt` window; on
 AArch64 it waits in `wfi` with them masked, which a pending interrupt
 still wakes it from. Either way an idle CPU is idle, and the code it runs
 need not know about interrupts at all, its red zone included.
+
+A device's interrupt is no different (`irq`): it wakes the CPU it is
+routed to, at once if that one sleeps, at its next sleep if not, and the
+driver then looks at its queues. On x86_64 it is an MSI-X message, to the
+local APIC of that CPU. On AArch64, where QEMU's virt machine has no MSIs
+without an ITS, it is the device's PCI line, an SPI of the GIC routed to
+that CPU and taken on its rising edge; the device holds the line up till
+its ISR is read, which `Irq::rearm` does before the driver looks, so its
+next news raises it again. The disk routes its interrupt to the CPU that
+asks of it, and sleeps till the answer; the network card's is the
+kernel's to route, to the CPU that waits for the network.
 
 A kernel that wants code run in the middle of whatever a CPU runs, to
 preempt it say, asks for the tick there: `cpu::start_tick(period_us,
