@@ -7,6 +7,9 @@
 //! is pending, and carries on where it was. So no handler ever runs in the
 //! middle of ChrysaLisp's code.
 //!
+//! A device's interrupt, its PCI line (`line_enable`), is an SPI routed to
+//! one CPU, which it wakes as the timer does (`irq`).
+//!
 //! But on a CPU that takes the tick (`cpu::start_tick`): there IRQs are
 //! unmasked, the virtual timer is the tick's, set again each period, and
 //! `irq` handles it, and a wake, in the middle of anything.
@@ -22,6 +25,8 @@ const INTID_VTIMER: u32 = 27;
 /// the SGI one CPU wakes another with
 const INTID_WAKE: u32 = 1;
 
+/// the distributor
+static GICD: AtomicUsize = AtomicUsize::new(0);
 /// each CPU's redistributor
 static GICR: [AtomicUsize; MAX_CPUS] = [const { AtomicUsize::new(0) }; MAX_CPUS];
 /// each ticking CPU's period, in the counter's ticks
@@ -78,6 +83,7 @@ pub unsafe fn init(gicd: u64, ranges: &[(u64, u64)], cpus: &[CpuInfo]) -> bool {
     // group 1 on in the distributor, the firmware has turned on affinity
     // routing
     let d = gicd as usize;
+    GICD.store(d, Ordering::Relaxed);
     wr32(d, rd32(d) | (1 << 1));
     while rd32(d) & (1 << 31) != 0 {
         core::hint::spin_loop();
@@ -115,6 +121,47 @@ pub unsafe fn init_cpu(n: usize) {
     // the timer off till a sleep sets it
     msr!("cntv_ctl_el0", 0);
     isb();
+}
+
+/// GICD_IROUTER's affinity for the CPU with this MPIDR, Aff3 in bits 32-39
+fn route_affinity(mpidr: u64) -> u64 {
+    (mpidr >> 32 & 0xff) << 32 | (mpidr & 0xff_ffff)
+}
+
+/// A device's SPI, its line: group 1, a middling priority, taken on its
+/// rising edge, routed to the CPU with this MPIDR, and on. A CPU it wakes
+/// acknowledges and ends it, as it does a wake, so the device lowers the
+/// line by its own means before it can raise it again (`irq`).
+pub fn line_enable(intid: u32, mpidr: u64) {
+    let d = GICD.load(Ordering::Relaxed);
+    if d == 0 || !(32..1020).contains(&intid) {
+        return;
+    }
+    let (word, bit) = ((intid / 32) as usize * 4, 1u32 << (intid % 32));
+    unsafe {
+        wr32(d + 0x180 + word, bit); // GICD_ICENABLER, off while it is set
+        while rd32(d) & (1 << 31) != 0 {
+            core::hint::spin_loop();
+        }
+        wr32(d + 0x080 + word, rd32(d + 0x080 + word) | bit); // GICD_IGROUPR
+        ((d + 0x400 + intid as usize) as *mut u8).write_volatile(0x80); // GICD_IPRIORITYR
+        let cfg = d + 0xc00 + (intid / 16) as usize * 4; // GICD_ICFGR, edge
+        wr32(cfg, rd32(cfg) | 2 << (2 * (intid % 16)));
+        ((d + 0x6000 + 8 * intid as usize) as *mut u64).write_volatile(route_affinity(mpidr)); // GICD_IROUTER
+        wr32(d + 0x100 + word, bit); // GICD_ISENABLER
+    }
+}
+
+/// a device's SPI sent to the CPU with this MPIDR from now on
+pub fn line_route(intid: u32, mpidr: u64) {
+    let d = GICD.load(Ordering::Relaxed);
+    if d == 0 || !(32..1020).contains(&intid) {
+        return;
+    }
+    unsafe {
+        ((d + 0x6000 + 8 * intid as usize) as *mut u64).write_volatile(route_affinity(mpidr));
+        asm!("dsb sy", options(nostack, preserves_flags));
+    }
 }
 
 /// acknowledge and end whatever is pending, it only woke this CPU

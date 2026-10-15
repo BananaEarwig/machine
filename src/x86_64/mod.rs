@@ -213,3 +213,30 @@ pub fn set_cpu_local(p: u64) {
 pub fn wake(hw_id: u64) {
     apic::wake(hw_id as u32)
 }
+
+///////////////
+// interrupts from devices (`irq`): MSIs, to one local APIC each
+///////////////
+
+/// the address and data of an MSI that wakes the CPU with this APIC id:
+/// fixed, edge, on the device's vector, which is ended and forgotten
+pub fn msi_message(apic: u64) -> Option<(u64, u32)> {
+    Some((0xfee0_0000 | (apic & 0xff) << 12, apic::VECTOR_DEVICE as u32))
+}
+
+/// an MSI-X table entry sent to this APIC from now on: its address's low
+/// word, written whole, then read, so the write has reached the device
+pub unsafe fn msi_route(entry: usize, apic: u64) {
+    crate::virtio::w32(entry, 0xfee0_0000 | (apic as u32 & 0xff) << 12);
+    crate::virtio::r32(entry);
+}
+
+/// a PC's PCI lines go through the IO APIC, which is left masked: MSIs
+/// instead
+pub fn pci_line(_f: &crate::pci::Function) -> Option<u32> {
+    None
+}
+
+pub fn line_enable(_intid: u32, _apic: u64) {}
+
+pub fn line_route(_intid: u32, _apic: u64) {}

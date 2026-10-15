@@ -18,6 +18,8 @@ use core::sync::atomic::{AtomicU64, Ordering};
 pub const VECTOR_TIMER: u8 = 0x20;
 pub const VECTOR_WAKE: u8 = 0x21;
 pub const VECTOR_TICK: u8 = 0x22;
+/// a device's MSI, which only wakes the CPU it is sent to
+pub const VECTOR_DEVICE: u8 = 0x23;
 pub const VECTOR_SPURIOUS: u8 = 0xff;
 
 // the local APIC's registers, offsets from its base

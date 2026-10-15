@@ -16,7 +16,8 @@
 //!   a periodic interrupt whose handler runs in the middle of anything;
 //! * PCI, by the ACPI MCFG (`pci`), and virtio's keyboard, tablet, disks
 //!   network card and sound (`virtio_input`, `virtio_blk`, `virtio_net`,
-//!   `virtio_snd`);
+//!   `virtio_snd`); the disks and the network card with interrupts that
+//!   wake a CPU, where there is a way (`irq`);
 //! * a RAM disk unpacked from a tar (`ramfs`).
 //!
 //! What is the CPU's own is in `x86_64/` and `aarch64/`, as `plat`. It was
@@ -40,6 +41,7 @@ pub mod plat;
 pub mod acpi;
 pub mod boot;
 pub mod display;
+pub mod irq;
 pub mod pci;
 pub mod ramfs;
 pub mod screen;
