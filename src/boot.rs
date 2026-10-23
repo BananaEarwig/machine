@@ -96,10 +96,24 @@ fn firmware_time_us() -> u64 {
     match uefi::runtime::get_time() {
         Ok(t) => {
             let days = cpu::days_from_civil(t.year() as i64, t.month() as i64, t.day() as i64);
-            let secs = days * 86400 + t.hour() as i64 * 3600 + t.minute() as i64 * 60 + t.second() as i64;
-            secs.max(0) as u64 * 1_000_000
+            let mut secs = days * 86400 + t.hour() as i64 * 3600 + t.minute() as i64 * 60 + t.second() as i64;
+            // UEFI: local time = UTC - time_zone (minutes). With none said,
+            // the clock is taken as UTC, as QEMU's and most servers' are; a
+            // clock kept in local time is out by its zone till it is set
+            // (imago's time-sync, or a linked node's time).
+            match t.time_zone() {
+                Some(tz) => {
+                    secs += tz as i64 * 60;
+                    kprintln!("[machine] the firmware's clock, {} minutes from UTC", -(tz as i64));
+                }
+                None => kprintln!("[machine] the firmware's clock, its zone not said: taken as UTC"),
+            }
+            (secs.max(0) as u64) * 1_000_000 + (t.nanosecond() / 1000) as u64
         }
-        Err(_) => 0,
+        Err(_) => {
+            kprintln!("[machine] no clock from the firmware: the time starts at 1970");
+            0
+        }
     }
 }
 
