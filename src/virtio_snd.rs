@@ -135,16 +135,28 @@ impl Sound {
         Some(s)
     }
 
+    /// the buffers the device has given back, the kernel's again
+    unsafe fn take_played(&mut self) {
+        while let Some(id) = self.tx.take() {
+            let k = id as usize / 3;
+            if k < BUFFERS {
+                self.free |= 1 << k;
+            }
+        }
+    }
+
+    /// The frames with the device, given and not yet given back: how long
+    /// a frame filled now waits to be played, at least.
+    pub fn queued(&mut self) -> usize {
+        unsafe { self.take_played() };
+        (BUFFERS - self.free.count_ones() as usize) * PERIOD
+    }
+
     /// Every buffer the device has played, filled by `fill`, PERIOD frames
     /// of 16-bit stereo, and given back to it. How many were.
     pub fn feed(&mut self, mut fill: impl FnMut(&mut [i16])) -> usize {
         unsafe {
-            while let Some(id) = self.tx.take() {
-                let k = id as usize / 3;
-                if k < BUFFERS {
-                    self.free |= 1 << k;
-                }
-            }
+            self.take_played();
             let mut n = 0;
             for k in 0..BUFFERS {
                 if self.free & (1 << k) == 0 {
