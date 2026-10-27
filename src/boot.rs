@@ -117,22 +117,29 @@ fn firmware_time_us() -> u64 {
     }
 }
 
-/// a seed for the random numbers, from the firmware's generator if it has one
-fn firmware_seed() -> u64 {
+/// A seed for the random numbers, 32 bytes from the firmware's generator,
+/// if it has one (EFI_RNG_PROTOCOL: the hardware's, or QEMU's virtio-rng),
+/// for the stream that makes keys where the CPU has no random number
+/// instruction (cpu::random_fill).
+fn firmware_seed(buf: &mut [u8; 32]) -> bool {
     use uefi::proto::rng::Rng;
-    let mut buf = [0u8; 8];
-    let ok = boot::get_handle_for_protocol::<Rng>()
+    boot::get_handle_for_protocol::<Rng>()
         .and_then(|h| boot::open_protocol_exclusive::<Rng>(h))
-        .and_then(|mut rng| rng.get_rng(None, &mut buf))
-        .is_ok();
-    if ok { u64::from_le_bytes(buf) } else { 0 }
+        .and_then(|mut rng| rng.get_rng(None, buf))
+        .is_ok()
 }
 
 /// The time of day, a seed, and what the platform wants of the firmware
 /// while it is here: the clock's rate, the CPUs, the interrupt controller.
 pub fn prepare() -> plat::Firmware {
     let unix_us = firmware_time_us();
-    cpu::seed(firmware_seed());
+    let mut seed = [0u8; 32];
+    let sure = firmware_seed(&mut seed);
+    if !sure && plat::hw_random().is_none() {
+        kprintln!("[machine] no random numbers: no instruction for them, and the firmware has no generator");
+    }
+    cpu::seed_bytes(&seed, sure);
+    seed.fill(0);
     plat::firmware(rsdp(), unix_us)
 }
 

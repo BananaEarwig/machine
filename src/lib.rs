@@ -30,6 +30,7 @@ extern crate alloc;
 
 #[macro_use]
 pub mod cpu;
+pub mod chacha;
 
 #[cfg(target_arch = "x86_64")]
 #[path = "x86_64/mod.rs"]

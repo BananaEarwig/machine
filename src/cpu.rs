@@ -195,24 +195,111 @@ pub fn days_from_civil(y: i64, m: i64, d: i64) -> i64 {
 // random bytes
 ///////////////
 
-static XORSHIFT: AtomicU64 = AtomicU64::new(0x9e37_79b9_7f4a_7c15);
+// Where the CPU has a random number instruction (RDRAND, RNDR), its
+// numbers. Where it has none (a Raspberry Pi 4's Cortex-A72; QEMU's
+// AArch64 on a Mac), ChaCha20 keyed by what the firmware's generator
+// gave at boot (boot::prepare), its key made again from its own output
+// after each use, so what it gave cannot be worked back from what comes
+// after. With neither, there is nothing that cannot be guessed: random_fill
+// says so, and keys are not made (docs/vpx.md, call 21). Before 27
+// October that case was a xorshift of the counter, which said it had
+// numbers.
 
-/// what the firmware gave to start the stirred numbers from, if anything
-pub fn seed(s: u64) {
-    XORSHIFT.fetch_xor(s, Ordering::Relaxed);
+struct Stream {
+    key: [u8; 32],
+    blocks: u64,
 }
 
-pub fn random_u64() -> u64 {
-    if let Some(v) = plat::hw_random() {
-        return v;
+static STREAM_LOCK: AtomicBool = AtomicBool::new(false);
+static mut STREAM: Stream = Stream { key: [0; 32], blocks: 0 };
+static SEEDED: AtomicBool = AtomicBool::new(false);
+
+fn stream_take() {
+    while STREAM_LOCK.compare_exchange_weak(false, true, Ordering::Acquire, Ordering::Relaxed).is_err() {
+        core::hint::spin_loop();
     }
-    // no random number instruction, the seed and the counter stirred
-    let mut x = XORSHIFT.load(Ordering::Relaxed) ^ plat::counter();
-    x ^= x << 13;
-    x ^= x >> 7;
-    x ^= x << 17;
-    XORSHIFT.store(x, Ordering::Relaxed);
-    x
+}
+
+fn stream_give() {
+    STREAM_LOCK.store(false, Ordering::Release);
+}
+
+/// Mix seed bytes into the stream's key: the firmware's generator's, 32 of
+/// them (boot::prepare). sure says they cannot be guessed, so the stream may
+/// make keys from then on.
+pub fn seed_bytes(seed: &[u8], sure: bool) {
+    stream_take();
+    // SAFETY: STREAM is only touched with STREAM_LOCK held
+    let st = unsafe { &mut *core::ptr::addr_of_mut!(STREAM) };
+    for (i, b) in seed.iter().enumerate() {
+        st.key[i % 32] ^= *b;
+    }
+    stream_give();
+    if sure && !seed.is_empty() {
+        SEEDED.store(true, Ordering::Release);
+    }
+}
+
+/// A seed of 64 bits, mixed in: not enough to make keys from alone.
+pub fn seed(s: u64) {
+    seed_bytes(&s.to_le_bytes(), false);
+}
+
+/// The stream's next bytes into buf: a block for each 32 bytes wanted, the
+/// key made again from the first 32 of each, the rest given.
+fn stream_fill(buf: &mut [u8]) {
+    stream_take();
+    // SAFETY: STREAM is only touched with STREAM_LOCK held
+    let st = unsafe { &mut *core::ptr::addr_of_mut!(STREAM) };
+    let mut at = 0;
+    while at < buf.len() {
+        // the counter, in the nonce: never the same block twice for a key
+        let mut nonce = [0u8; 12];
+        nonce[..8].copy_from_slice(&st.blocks.to_le_bytes());
+        st.blocks = st.blocks.wrapping_add(1);
+        let b = crate::chacha::chacha20_block(&st.key, 0, &nonce);
+        st.key.copy_from_slice(&b[..32]);
+        let n = (buf.len() - at).min(32);
+        buf[at..at + n].copy_from_slice(&b[32..32 + n]);
+        at += n;
+    }
+    stream_give();
+}
+
+/// buf filled with random bytes that cannot be guessed, for keys, secrets,
+/// nonces and ids: false if there are none here (no random number
+/// instruction, and the firmware gave no seed), and then buf is not to be
+/// used.
+pub fn random_fill(buf: &mut [u8]) -> bool {
+    let mut at = 0;
+    while at < buf.len() {
+        let Some(v) = plat::hw_random() else { break };
+        let n = (buf.len() - at).min(8);
+        buf[at..at + n].copy_from_slice(&v.to_le_bytes()[..n]);
+        at += n;
+    }
+    if at == buf.len() {
+        return true;
+    }
+    // the instruction gave out, or there is none: the stream, if seeded
+    if !SEEDED.load(Ordering::Acquire) {
+        return false;
+    }
+    stream_fill(&mut buf[at..]);
+    true
+}
+
+/// A number that varies, for what needs one to differ but not to be
+/// unguessable (a disk's id, TCP's first sequence numbers): from
+/// random_fill, or the stream with the counter mixed in where it has none.
+pub fn random_u64() -> u64 {
+    let mut b = [0u8; 8];
+    if random_fill(&mut b) {
+        return u64::from_le_bytes(b);
+    }
+    seed(plat::counter());
+    stream_fill(&mut b);
+    u64::from_le_bytes(b)
 }
 
 ///////////////
