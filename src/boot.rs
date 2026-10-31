@@ -124,7 +124,7 @@ fn firmware_time_us() -> u64 {
 fn firmware_seed(buf: &mut [u8; 32]) -> bool {
     use uefi::proto::rng::Rng;
     boot::get_handle_for_protocol::<Rng>()
-        .and_then(|h| boot::open_protocol_exclusive::<Rng>(h))
+        .and_then(boot::open_protocol_exclusive::<Rng>)
         .and_then(|mut rng| rng.get_rng(None, buf))
         .is_ok()
 }

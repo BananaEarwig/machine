@@ -94,6 +94,12 @@ fn parent(key: &[u8]) -> Option<&[u8]> {
     }
 }
 
+impl Default for RamFs {
+    fn default() -> Self {
+        RamFs::new()
+    }
+}
+
 impl RamFs {
     pub const fn new() -> Self {
         RamFs {
@@ -385,7 +391,12 @@ impl RamFs {
         let Some(f) = self.fd(fd) else { return -1 };
         let (key, pos) = (f.key.clone(), f.pos);
         let Some(data) = self.file(&key) else { return -1 };
-        let n = buf.len().min(data.len().saturating_sub(pos));
+        // a seek may leave pos past the end, which reads nothing, as on
+        // Linux; data[pos..pos] would panic there
+        if pos >= data.len() {
+            return 0;
+        }
+        let n = buf.len().min(data.len() - pos);
         buf[..n].copy_from_slice(&data[pos..pos + n]);
         self.fd(fd).unwrap().pos += n;
         n as i64

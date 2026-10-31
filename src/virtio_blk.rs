@@ -132,7 +132,7 @@ impl Disk {
             let n = (len - done).min(BOUNCE - skip);
             let span = (skip + n).div_ceil(SECTOR as usize) * SECTOR as usize;
             unsafe {
-                if (skip != 0 || n % SECTOR as usize != 0) && !self.request(T_IN, first, span, false) {
+                if (skip != 0 || !n.is_multiple_of(SECTOR as usize)) && !self.request(T_IN, first, span, false) {
                     return -1;
                 }
                 core::ptr::copy_nonoverlapping(data.as_ptr().add(done), self.bounce.add(skip), n);
