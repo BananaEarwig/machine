@@ -1,0 +1,7 @@
+# The machine's own config builds for UEFI with core and alloc built for
+# it; these tests are the host's, with its std.
+[build]
+target = "host-tuple"
+
+[unstable]
+build-std = []

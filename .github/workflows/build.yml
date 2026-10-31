@@ -17,3 +17,11 @@ jobs:
         run: rustup component add rust-src
       - name: Build
         run: RUSTC_BOOTSTRAP=1 cargo build --release --target ${{ matrix.target }}
+
+  # The modules with no hardware in them, tested on the host (host-tests/)
+  host-tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - name: Test
+        run: cd host-tests && cargo test

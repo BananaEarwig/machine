@@ -33,8 +33,10 @@ machine = { path = "machine" }
 | `display` | the screen, the firmware's GOP framebuffer in the mode asked for, or QEMU's ramfb at any size on AArch64 |
 | `pci` | PCI, by the ACPI MCFG |
 | `virtio`, `virtio_input`, `virtio_blk`, `virtio_net` | virtio 1.0 on PCI: the keyboard and tablet, as Linux input events, polled; disks, by their serial, read and written at any offset, a request waited for asleep till the disk's interrupt; the network card, Ethernet frames in and out, with an interrupt for the kernel to route to a CPU that waits |
+| `virtio_snd` | sound, QEMU's virtio-sound-pci: one 16-bit stereo stream at 44,100 frames a second, from a ring of buffers the kernel's mixer fills, polled |
 | `irq` | interrupts from devices, that only wake a CPU: an MSI-X message on x86_64, the PCI line on QEMU's AArch64 virt machine, routed to one CPU at a time; a device with neither is polled |
 | `ramfs` | a RAM disk unpacked from a ustar tar, with mtimes and modes; packed back whole, or just what changed since a point, as an overlay to put back over it |
+| `chacha` | ChaCha20's block function, for `cpu`'s random bytes where the CPU has no instruction for them: a stream keyed from the firmware's seed |
 | `acpi` | finding the firmware's tables |
 | `plat` | what is the CPU's own: `x86_64/` (COM1, the PS/2 keyboard in any of pc-keyboard's layouts, the page tables, the TSC, the GDT and IDT, the local APIC and its timer, INIT-SIPI-SIPI) and `aarch64/` (the PL011, the page tables, the generic timer, the GICv3, PSCI, the exception vectors) |
 
@@ -100,6 +102,19 @@ Under QEMU: q35 with OVMF for x86_64; `virt,gic-version=3` with AAVMF or
 Homebrew's `edk2-aarch64-code.fd` for AArch64, under the Hypervisor
 framework on an Apple Silicon Mac. ChrysaLisp-host's `bare/run-qemu.sh`
 is a runner for both. It has not yet run on a real machine.
+
+## Testing it
+
+The modules with no hardware in them, `chacha` and `ramfs`, are tested
+on the host, by a crate of their own that includes them as they are
+(`host-tests/`): ChaCha20 against RFC 8439's vector, and the RAM disk's
+files, seeks, tars and overlays.
+
+```
+cd host-tests && cargo test
+```
+
+The rest is tried by the kernels built on it, under QEMU.
 
 ## Licence
 
