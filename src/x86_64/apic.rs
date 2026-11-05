@@ -318,7 +318,25 @@ extern "sysv64" fn exception_report(frame: *const u64) -> ! {
     let cr2: u64;
     unsafe { asm!("mov {}, cr2", out(reg) cr2, options(nomem, nostack)) };
     if f[0] == 14 {
-        crate::stack::null_check(cr2, f[2]);
+        if let Some(r) = crate::stack::null_check(cr2, f[2], f[5]) {
+            // back as the CPU would have, by its own frame, to r.pc: what it
+            // pushed is rip, cs, rflags, rsp and ss
+            let sp = f[5] - 8;
+            unsafe {
+                (sp as *mut u64).write(f[2]);
+                let back = frame as *mut u64;
+                back.add(2).write(r.pc);
+                back.add(5).write(sp);
+                asm!(
+                    "mov rsp, {f}",
+                    "iretq",
+                    f = in(reg) back.add(2),
+                    in("rdi") r.a0,
+                    in("rsi") r.a1,
+                    options(noreturn)
+                );
+            }
+        }
     }
     let name = EXCEPTION_NAMES.get(f[0] as usize).copied().unwrap_or("exception");
     crate::kprintln!(

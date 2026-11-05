@@ -102,16 +102,28 @@ pub(crate) fn init() {
 /// that runs programs ends the program, as a host does.
 static NULL_HOOK: AtomicUsize = AtomicUsize::new(0);
 
-/// `hook(address, pc)` for a fault on a null pointer, or a jump to one, from now on.
-pub fn on_null(hook: fn(u64, u64) -> !) {
+/// Where a fault goes on from: pc, with these in the first two argument registers,
+/// and sp lower by a word, pc at it, the address that faulted there.
+#[derive(Clone, Copy)]
+pub struct Resume {
+    pub pc: u64,
+    pub a0: u64,
+    pub a1: u64,
+}
+
+/// `hook(address, pc, sp)` for a fault on a null pointer, or a jump to one, from
+/// now on: where to go on, or None to report it as a bug. The hook may end the run.
+pub fn on_null(hook: fn(u64, u64, u64) -> Option<Resume>) {
     NULL_HOOK.store(hook as usize, Ordering::Release);
 }
 
-/// A fault at addr, from pc: the hook, if it is a null pointer's and there is one.
-pub(crate) fn null_check(addr: u64, pc: u64) {
+/// A fault at addr, from pc with this sp: the hook's answer, if it is a null
+/// pointer's and there is one.
+pub(crate) fn null_check(addr: u64, pc: u64, sp: u64) -> Option<Resume> {
     let h = NULL_HOOK.load(Ordering::Acquire);
-    if h != 0 && addr < PAGE as u64 {
-        let f: fn(u64, u64) -> ! = unsafe { core::mem::transmute(h) };
-        f(addr, pc)
+    if h == 0 || addr >= PAGE as u64 {
+        return None;
     }
+    let f: fn(u64, u64, u64) -> Option<Resume> = unsafe { core::mem::transmute(h) };
+    f(addr, pc, sp)
 }
