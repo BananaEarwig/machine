@@ -159,7 +159,7 @@ pub struct Firmware {
 /// trampoline the other CPUs start in.
 pub fn firmware(rsdp: usize, unix_us: u64) -> Firmware {
     let t0 = rdtsc();
-    boot::stall(100_000);
+    boot::stall(core::time::Duration::from_micros(100_000));
     let t1 = rdtsc();
     let tsc_hz = (t1 - t0) * 10;
     cpu::clock_init(tsc_hz, t0, unix_us);
