@@ -28,17 +28,25 @@ impl Stack {
     /// A stack of at least size bytes, zeroed, its top 4 KB aligned, with a
     /// guard page below it if the machine's tables can have one.
     pub fn new(size: usize) -> Stack {
-        let total = size.next_multiple_of(PAGE) + PAGE;
-        let layout = Layout::from_size_align(total, PAGE).unwrap();
+        Stack::try_new(size).expect("no memory for a stack")
+    }
+
+    /// The same, or None if there is no memory for it, or the size makes no
+    /// sense: what a kernel wants for a stack a program asked for.
+    pub fn try_new(size: usize) -> Option<Stack> {
+        let total = size.checked_next_multiple_of(PAGE)?.checked_add(PAGE)?;
+        let layout = Layout::from_size_align(total, PAGE).ok()?;
         let base = unsafe { alloc_zeroed(layout) };
-        assert!(!base.is_null(), "no memory for a stack");
+        if base.is_null() {
+            return None;
+        }
         let guarded = plat::paging::set_present(base as usize, false);
         if guarded {
             // the first free entry takes it; with none free, it is a guard
             // all the same, only not named as one in a report
             let _ = GUARDS.iter().find(|g| g.compare_exchange(0, base as usize, Ordering::AcqRel, Ordering::Relaxed).is_ok());
         }
-        Stack { base, total, guarded }
+        Some(Stack { base, total, guarded })
     }
 
     /// the top, where the stack starts, 4 KB aligned
