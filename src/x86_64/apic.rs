@@ -285,6 +285,9 @@ macro_rules! isr_stubs {
                 "jmp isr_common",
             )*
             "isr_common:",
+            // r15 too: exception_report never returns, so need not keep it, and
+            // the program going on from a fault does (Imago's core record)
+            "mov rsi, r15",
             "mov rdi, rsp",
             "and rsp, -16",
             "call exception_report",
@@ -313,7 +316,7 @@ const EXCEPTION_NAMES: [&str; 21] = [
 /// what the stubs call, with the vector, the error code and what the CPU
 /// pushed, rip, cs, rflags, rsp and ss
 #[no_mangle]
-extern "sysv64" fn exception_report(frame: *const u64) -> ! {
+extern "sysv64" fn exception_report(frame: *const u64, r15: u64) -> ! {
     let f = unsafe { core::slice::from_raw_parts(frame, 7) };
     let cr2: u64;
     unsafe { asm!("mov {}, cr2", out(reg) cr2, options(nomem, nostack)) };
@@ -333,6 +336,7 @@ extern "sysv64" fn exception_report(frame: *const u64) -> ! {
                     f = in(reg) back.add(2),
                     in("rdi") r.a0,
                     in("rsi") r.a1,
+                    in("r15") r15,
                     options(noreturn)
                 );
             }
