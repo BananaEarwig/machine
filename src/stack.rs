@@ -92,5 +92,26 @@ pub(crate) fn init() {
     let (lo, hi) = crate::boot::heap_range();
     if lo == hi || !unsafe { plat::paging::own_tables(lo as u64, hi as u64) } {
         crate::kprintln!("[machine] the firmware's page tables, so stacks have no guard pages");
+        return;
+    }
+    // nothing lives at 0: reading it is a null pointer, and faults
+    plat::paging::set_present(0, false);
+}
+
+/// What a fault on the first page calls, in place of reporting a bug: a kernel
+/// that runs programs ends the program, as a host does.
+static NULL_HOOK: AtomicUsize = AtomicUsize::new(0);
+
+/// `hook(address, pc)` for a fault on a null pointer, or a jump to one, from now on.
+pub fn on_null(hook: fn(u64, u64) -> !) {
+    NULL_HOOK.store(hook as usize, Ordering::Release);
+}
+
+/// A fault at addr, from pc: the hook, if it is a null pointer's and there is one.
+pub(crate) fn null_check(addr: u64, pc: u64) {
+    let h = NULL_HOOK.load(Ordering::Acquire);
+    if h != 0 && addr < PAGE as u64 {
+        let f: fn(u64, u64) -> ! = unsafe { core::mem::transmute(h) };
+        f(addr, pc)
     }
 }
