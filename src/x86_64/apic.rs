@@ -317,6 +317,9 @@ extern "sysv64" fn exception_report(frame: *const u64) -> ! {
     let f = unsafe { core::slice::from_raw_parts(frame, 7) };
     let cr2: u64;
     unsafe { asm!("mov {}, cr2", out(reg) cr2, options(nomem, nostack)) };
+    if f[0] == 14 {
+        crate::stack::null_check(cr2, f[2]);
+    }
     let name = EXCEPTION_NAMES.get(f[0] as usize).copied().unwrap_or("exception");
     crate::kprintln!(
         "\n[machine] cpu {} {} ({}), error {:#x}\n  rip {:#x} rsp {:#x} rflags {:#x} cr2 {:#x}",

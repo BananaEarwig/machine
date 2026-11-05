@@ -37,6 +37,11 @@ fn span(level: u32) -> u64 {
     1 << (12 + 9 * (3 - level))
 }
 
+/// does a block of size at va want 4 KB pages: some of lo..hi, or page 0?
+fn wanted(va: u64, size: u64, lo: u64, hi: u64) -> bool {
+    va == 0 || (va < hi && va + size > lo)
+}
+
 /// a block of this level split into a table of the next, its blocks split
 /// again where they hold some of lo..hi
 unsafe fn split(e: u64, level: u32, va: u64, lo: u64, hi: u64) -> u64 {
@@ -50,7 +55,7 @@ unsafe fn split(e: u64, level: u32, va: u64, lo: u64, hi: u64) -> u64 {
         let cva = va + j * child;
         let c = if level == 1 {
             let c = phys | attrs;
-            if cva < hi && cva + child > lo { split(c, 2, cva, lo, hi) } else { c }
+            if wanted(cva, child, lo, hi) { split(c, 2, cva, lo, hi) } else { c }
         } else {
             phys | attrs | TABLE
         };
@@ -71,7 +76,7 @@ unsafe fn copy(table: u64, level: u32, n: u64, va: u64, lo: u64, hi: u64) -> u64
         let c = if e & VALID == 0 || level == 3 {
             e
         } else if e & TABLE == 0 {
-            if (level == 1 || level == 2) && eva < hi && eva + size > lo { split(e, level, eva, lo, hi) } else { e }
+            if (level == 1 || level == 2) && wanted(eva, size, lo, hi) { split(e, level, eva, lo, hi) } else { e }
         } else {
             copy(e & ADDR, level + 1, 512, eva, lo, hi) | (e & !ADDR)
         };

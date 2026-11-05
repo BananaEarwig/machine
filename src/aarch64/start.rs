@@ -338,6 +338,10 @@ const VECTOR_KINDS: [&str; 4] = ["synchronous", "IRQ", "FIQ", "SError"];
 
 #[no_mangle]
 extern "C" fn exception_report(vector: u64, esr: u64, elr: u64, far: u64, sp: u64) -> ! {
+    // a data or instruction abort, from this level or below
+    if matches!(esr >> 26, 0x20 | 0x21 | 0x24 | 0x25) {
+        crate::stack::null_check(far, elr);
+    }
     crate::kprintln!(
         "\n[machine] cpu {} (MPIDR {:#x}) {} exception, ESR {:#x} (class {:#x})\n  pc {:#x} sp {:#x} far {:#x}",
         super::this_cpu(),
