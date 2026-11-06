@@ -43,7 +43,7 @@ pub fn rsdp() -> usize {
 /// say so. Gives the RSDP.
 pub fn start(name: &str) -> usize {
     let rsdp = uefi::system::with_config_table(|t| {
-        t.iter().find(|e| e.guid == uefi::table::cfg::ACPI2_GUID).map(|e| e.address as usize).unwrap_or(0)
+        t.iter().find(|e| e.guid == uefi::table::cfg::ConfigTableEntry::ACPI2_GUID).map(|e| e.address as usize).unwrap_or(0)
     });
     RSDP.store(rsdp, Ordering::Relaxed);
     let serial = plat::console_init(rsdp);
