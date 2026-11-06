@@ -215,6 +215,10 @@ macro_rules! vectors {
             "mrs x2, elr_el1",
             "mrs x3, far_el1",
             "mov x4, sp",
+            "mov x5, x28",
+            // x27 too: exception_report never returns, so need not keep it, and
+            // the program going on from a fault does (Imago's core record)
+            "mov x6, x27",
             // the stack may be what went wrong, a stack of its own
             // one for each CPU, by the low bits of its affinity, so that
             // CPUs failing together do not share one
@@ -337,10 +341,28 @@ pub unsafe fn install_vectors() {
 const VECTOR_KINDS: [&str; 4] = ["synchronous", "IRQ", "FIQ", "SError"];
 
 #[no_mangle]
-extern "C" fn exception_report(vector: u64, esr: u64, elr: u64, far: u64, sp: u64) -> ! {
-    // a data or instruction abort, from this level or below
+extern "C" fn exception_report(vector: u64, esr: u64, elr: u64, far: u64, sp: u64, x28: u64, x27: u64) -> ! {
+    // a data or instruction abort, from this level or below. The machine's sp is
+    // the C stack, and the program's own is x28 (Imago's back end, ta_put_trap)
     if matches!(esr >> 26, 0x20 | 0x21 | 0x24 | 0x25) {
-        crate::stack::null_check(far, elr);
+        if let Some(r) = crate::stack::null_check(far, elr, x28) {
+            let vsp = x28 - 8;
+            unsafe {
+                (vsp as *mut u64).write(elr);
+                core::arch::asm!(
+                    "msr elr_el1, {pc}",
+                    "mov sp, {sp}",
+                    "eret",
+                    pc = in(reg) r.pc,
+                    sp = in(reg) sp,
+                    in("x0") r.a0,
+                    in("x1") r.a1,
+                    in("x28") vsp,
+                    in("x27") x27,
+                    options(noreturn)
+                );
+            }
+        }
     }
     crate::kprintln!(
         "\n[machine] cpu {} (MPIDR {:#x}) {} exception, ESR {:#x} (class {:#x})\n  pc {:#x} sp {:#x} far {:#x}",
